@@ -37,6 +37,8 @@ function useHeadings(editor: Editor): Heading[] {
 }
 
 const PANEL_WIDTH = 248
+const FOLLOW_SPEED = 1.5 // px/ms: slower than this is reading, the marker keeps up
+const SETTLE_MS = 180 // a fast scroll moves the marker this long after it stops
 
 /** Word-style navigation pane. Collapsed, it is a small "Outline" tab in the same spot and the page re-centres. */
 export default function DocOutline({ editor, open, onToggle }: { editor: Editor; open: boolean; onToggle: () => void }) {
@@ -47,36 +49,51 @@ export default function DocOutline({ editor, open, onToggle }: { editor: Editor;
   // the end of the doc can't reach the top of the screen, so scroll-spy alone would miss them.
   const pinned = useRef<string | null>(null)
 
-  // Highlight the section being read: the last heading above the top of the viewport.
+  // Highlight the section being read: the last heading above the top of the viewport. While
+  // the reader scrolls slowly the marker follows along; a fast fling only moves it once the
+  // page settles, so it glides once to where they stopped instead of chasing every heading.
   useEffect(() => {
     if (!open || headings.length === 0) return
     let frame = 0
+    let settle: number | undefined
+    let last = { y: window.scrollY, t: performance.now() }
     const unpin = () => {
       pinned.current = null
     }
-    const update = () => {
-      cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => {
-        if (pinned.current) return
-        let current: string | null = null
-        for (const h of headings) {
-          const el = editor.view.nodeDOM(h.pos) as HTMLElement | null
-          if (!el?.getBoundingClientRect) continue
-          if (el.getBoundingClientRect().top <= TOP_OFFSET + 24) current = h.key
-          else break
-        }
-        setActive(current ?? headings[0].key)
-      })
+    const current = () => {
+      let key: string | null = null
+      for (const h of headings) {
+        const el = editor.view.nodeDOM(h.pos) as HTMLElement | null
+        if (!el?.getBoundingClientRect) continue
+        if (el.getBoundingClientRect().top <= TOP_OFFSET + 24) key = h.key
+        else break
+      }
+      return key ?? headings[0].key
     }
-    update()
+    const commit = () => {
+      if (!pinned.current) setActive(current())
+    }
+    const onScroll = () => {
+      const now = performance.now()
+      const gap = now - last.t
+      // The first event after a pause has no speed yet: wait for the next one or for the settle.
+      const speed = gap > 120 ? Infinity : Math.abs(window.scrollY - last.y) / Math.max(1, gap) // px per ms
+      last = { y: window.scrollY, t: now }
+      window.clearTimeout(settle)
+      cancelAnimationFrame(frame)
+      if (speed < FOLLOW_SPEED) frame = requestAnimationFrame(commit)
+      settle = window.setTimeout(commit, SETTLE_MS)
+    }
+    commit()
     const userScroll = ['wheel', 'touchmove', 'keydown'] as const
-    window.addEventListener('scroll', update, { passive: true })
-    window.addEventListener('resize', update)
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', commit)
     for (const e of userScroll) window.addEventListener(e, unpin, { passive: true })
     return () => {
       cancelAnimationFrame(frame)
-      window.removeEventListener('scroll', update)
-      window.removeEventListener('resize', update)
+      window.clearTimeout(settle)
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', commit)
       for (const e of userScroll) window.removeEventListener(e, unpin)
     }
   }, [editor, headings, open])
@@ -163,7 +180,7 @@ export default function DocOutline({ editor, open, onToggle }: { editor: Editor;
                             )}
                           </span>
                           <button className="outline-item" data-level={h.level} data-active={active === h.key || undefined} onClick={() => go(h)} title={h.text}>
-                            {active === h.key && <motion.span layoutId="outline-active" className="outline-active" transition={softSpring} />}
+                            {active === h.key && <motion.span layoutId="outline-active" className="outline-active" transition={{ type: 'spring', stiffness: 260, damping: 32, mass: 0.9 }} />}
                             <span className="outline-text">{h.text || <em>Untitled heading</em>}</span>
                           </button>
                         </motion.li>

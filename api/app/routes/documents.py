@@ -186,6 +186,28 @@ async def export_docx(doc_id: str, session: SessionDep, user: CurrentUser) -> Re
     return _download(data, doc.title, "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
+def _kind_doc(session: SessionDep, user: CurrentUser, doc_id: str, kind: DocKind, what: str):
+    assert user.id is not None
+    doc = documents.get_document(session, user.id, doc_id)
+    if doc.kind is not kind:
+        raise DocumentError(400, f"{what} export is available for {'sheets' if kind is DocKind.sheet else 'slide decks'} only")
+    return doc, documents.content_of(doc)
+
+
+@router.get("/{doc_id}/export/xlsx")
+async def export_xlsx(doc_id: str, session: SessionDep, user: CurrentUser) -> Response:
+    doc, content = _kind_doc(session, user, doc_id, DocKind.sheet, "Excel")
+    data = await run_in_threadpool(export.to_xlsx, doc.title, content["columns"], content["rows"])
+    return _download(data, doc.title, "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@router.get("/{doc_id}/export/pptx")
+async def export_pptx(doc_id: str, session: SessionDep, user: CurrentUser) -> Response:
+    doc, content = _kind_doc(session, user, doc_id, DocKind.slides, "PowerPoint")
+    data = await run_in_threadpool(export.to_pptx, doc.title, content["slides"])
+    return _download(data, doc.title, "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+
+
 class GoogleExport(BaseModel):
     url: str
 
@@ -196,7 +218,7 @@ async def export_google(doc_id: str, session: SessionDep, user: CurrentUser) -> 
     assert user.id is not None
     doc = documents.get_document(session, user.id, doc_id)
     if not oauth.has_google(session, user.id):
-        raise DocumentError(409, "Connect Google to export to Google Docs")
+        raise DocumentError(409, "Connect Google to export to Google Drive")
     synced = await run_in_threadpool(backup.backup_now, doc.id)
     summary = DocumentSummary.of(synced) if synced else None
     if summary is None or summary.drive_url is None:

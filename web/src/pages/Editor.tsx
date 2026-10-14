@@ -1,18 +1,22 @@
-import { ArrowLeft, Check, CircleNotch, CloudCheck, CloudSlash, Plus, Robot, Trash, WarningCircle } from '@phosphor-icons/react'
+import { ArrowLeft, Check, CircleNotch, CloudCheck, CloudSlash, Plus, Printer, Robot, Trash, WarningCircle } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
-import DocEditor, { type DocActions } from '../components/DocEditor'
+import DocEditor from '../components/DocEditor'
+import ExportMenu, { type DocActions } from '../components/ExportMenu'
 import { api, type Cell, type Doc, type GoogleStatus, type SheetBody, type SlidesBody } from '../lib/api'
 import { KINDS, softSpring } from '../lib/kinds'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+const SAVED_SHOWN_MS = 2500 // "Saved" stays this long, then the status line folds away
 
 /** Debounced autosave: batches title/content edits and PATCHes after a pause. */
 function useAutosave(id: string | undefined, onSaved: () => void) {
   const [state, setState] = useState<SaveState>('idle')
   const pending = useRef<{ title?: string; content?: Doc['content'] }>({})
   const timer = useRef<number | undefined>(undefined)
+  const hide = useRef<number | undefined>(undefined)
 
   const flush = useCallback(async () => {
     window.clearTimeout(timer.current)
@@ -22,7 +26,11 @@ function useAutosave(id: string | undefined, onSaved: () => void) {
     setState('saving')
     try {
       await api.updateDocument(id, patch)
-      setState('saved')
+      // Edits made while this request ran are already queued and keep showing "Saving".
+      if (Object.keys(pending.current).length === 0) {
+        setState('saved')
+        hide.current = window.setTimeout(() => setState('idle'), SAVED_SHOWN_MS)
+      }
       onSaved()
     } catch {
       setState('error')
@@ -32,6 +40,8 @@ function useAutosave(id: string | undefined, onSaved: () => void) {
   const queue = useCallback(
     (patch: { title?: string; content?: Doc['content'] }) => {
       pending.current = { ...pending.current, ...patch }
+      window.clearTimeout(hide.current)
+      setState('saving') // from the first keystroke, so the reader sees it syncing
       window.clearTimeout(timer.current)
       timer.current = window.setTimeout(flush, 650)
     },
@@ -39,25 +49,29 @@ function useAutosave(id: string | undefined, onSaved: () => void) {
   )
 
   useEffect(() => () => void flush(), [flush])
+  useEffect(() => () => window.clearTimeout(hide.current), [])
   return { state, queue, flush }
 }
 
+const SAVE_LABELS = {
+  saving: { icon: <CircleNotch size={14} className="spin" />, text: 'Saving…' },
+  saved: { icon: <Check size={14} weight="bold" />, text: 'Saved' },
+  error: { icon: <WarningCircle size={14} weight="fill" />, text: 'Not saved' },
+}
+
+/** Stays mounted from "Saving…" to "Saved" so only the icon and words change, not the whole line. */
 function SaveIndicator({ state }: { state: SaveState }) {
-  const map = {
-    idle: null,
-    saving: { icon: <CircleNotch size={14} className="spin" />, text: 'Saving' },
-    saved: { icon: <Check size={14} weight="bold" />, text: 'Saved' },
-    error: { icon: <WarningCircle size={14} weight="fill" />, text: 'Not saved' },
-  }[state]
+  if (state === 'idle') return null
+  const { icon, text } = SAVE_LABELS[state]
   return (
-    <AnimatePresence mode="wait">
-      {map && (
-        <motion.span key={state} className="save-state" data-state={state} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}>
-          {map.icon}
-          {map.text}
+    <span className="save-state" data-state={state} role="status">
+      <AnimatePresence initial={false} mode="popLayout">
+        <motion.span key={state} className="save-icon" initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.6 }} transition={{ duration: 0.16 }}>
+          {icon}
         </motion.span>
-      )}
-    </AnimatePresence>
+      </AnimatePresence>
+      {text}
+    </span>
   )
 }
 
@@ -256,34 +270,58 @@ export default function Editor() {
   return (
     <motion.main className="editor" data-kind={doc.kind} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={softSpring}>
       <header className="editor-bar" data-kind={doc.kind}>
-        <div className="editor-meta">
+        <div className="editor-top">
           <Link to="/" className="icon-btn" aria-label="Back to library" title="Back to library">
             <ArrowLeft />
           </Link>
           <span className="editor-kind" title={KINDS[doc.kind].label}>
-            <Icon weight="fill" size={18} />
+            <Icon weight="fill" size={22} />
           </span>
-          <input
-            className="editor-title"
-            value={doc.title}
-            onChange={(e) => {
-              setDoc({ ...doc, title: e.target.value })
-              queue({ title: e.target.value })
-            }}
-            aria-label="Title"
-          />
-          {doc.source === 'mcp' && (
-            <span className="badge" title="Created by an AI agent over MCP">
-              <Robot size={12} weight="fill" /> AI
-            </span>
-          )}
-          <SaveIndicator state={state} />
-          <DriveBadge google={google} doc={doc} />
+          <div className="editor-heading">
+            <input
+              className="editor-title"
+              value={doc.title}
+              size={Math.max(4, doc.title.length)}
+              onChange={(e) => {
+                setDoc({ ...doc, title: e.target.value })
+                queue({ title: e.target.value })
+              }}
+              aria-label="Title"
+            />
+            <AnimatePresence initial={false}>
+              {(state !== 'idle' || doc.source === 'mcp' || google?.connected) && (
+                <motion.div
+                  key="status"
+                  className="editor-status"
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 18, opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ type: 'spring', stiffness: 380, damping: 34 }}
+                >
+                  {doc.source === 'mcp' && (
+                    <span className="badge" title="Created by an AI agent over MCP">
+                      <Robot size={12} weight="fill" /> AI
+                    </span>
+                  )}
+                  <SaveIndicator state={state} />
+                  <DriveBadge google={google} doc={doc} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+          <div className="editor-actions">
+            {doc.kind === 'doc' && (
+              <button type="button" className="icon-btn" aria-label="Print" title="Print (Ctrl+P)" onClick={() => window.print()}>
+                <Printer />
+              </button>
+            )}
+            <ExportMenu kind={doc.kind} actions={actions} />
+          </div>
         </div>
         {doc.kind === 'doc' && <div className="editor-tools" ref={setToolbarHost} />}
       </header>
       <div className="editor-body">
-        {doc.kind === 'doc' && <DocEditor body={doc.content} onChange={setContent} actions={actions} toolbarHost={toolbarHost} />}
+        {doc.kind === 'doc' && <DocEditor body={doc.content} onChange={setContent} toolbarHost={toolbarHost} />}
         {doc.kind === 'sheet' && <SheetEditor body={doc.content} onChange={setContent} />}
         {doc.kind === 'slides' && <SlidesEditor body={doc.content} onChange={setContent} />}
       </div>

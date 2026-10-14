@@ -3,7 +3,7 @@
 A calm home for docs, sheets and slides, with its own editor, plus an MCP endpoint that lets local AI agents create documents. Signing in with Google, or linking Google later, turns on automatic Drive backup.
 
 - `api/`: FastAPI, the official MCP Python SDK, Google API clients, WeasyPrint (PDF) and python-docx (Word)
-- `web/`: React with a TipTap editor (bold, italic, underline, font size, alignment, Letter/A4 pages, a right-click format menu, print, and export)
+- `web/`: React with a TipTap editor (bold, italic, underline, font size, alignment, Letter/A4 pages, a right-click format menu, print, and export). The editor header follows Google Docs: title and save status on top, then a tool strip whose groups move into a ⋮ menu when the window is narrow
 
 ## Run
 
@@ -50,10 +50,11 @@ Legacy `.doc`, `.xls`, `.ppt` and OpenDocument files are refused with a "save as
 
 - **Storage:** Chia's database is the source of truth.
 - **Backup:** for users signed in with or linked to Google, each document is mirrored as a native Google Doc, Sheet or Slides file in a `Chia` folder in their Drive. The mirror is written about 4 seconds after the last edit. Backups that were still pending when the server stopped are resumed on startup.
-- **Export (docs):**
-  - `GET /api/documents/{id}/export/pdf?background=%23F7F4ED`: PDF with any page colour.
-  - `GET /api/documents/{id}/export/docx`: Word document.
-  - `POST /api/documents/{id}/export/google`: syncs the Drive copy and returns its URL.
+- **Export:** the **Export** button in every editor.
+  - Docs: `GET /api/documents/{id}/export/pdf?background=%23F7F4ED` (PDF with any page colour) and `GET .../export/docx` (Word).
+  - Sheets: `GET .../export/xlsx` (Excel, grey frozen header row).
+  - Slides: `GET .../export/pptx` (16:9 PowerPoint; lines starting with `- ` become bullets).
+  - All kinds: `POST .../export/google` syncs the Drive copy and returns its Google Docs, Sheets or Slides URL.
 - **Printing:** uses real `@page` sizes and always prints in light colours.
 
 ## Connect a local AI over MCP

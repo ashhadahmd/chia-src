@@ -1,4 +1,4 @@
-"""Render a Chia doc (editor HTML) to PDF or DOCX.
+"""Render a Chia doc (editor HTML) to PDF or DOCX, a sheet to XLSX and slides to PPTX.
 
 The editor emits a small, known subset of HTML: p, h1-h3, ul/ol/li, blockquote, hr, br,
 strong/em/u/s/code, <span style="font-size; color">, `text-align` on blocks, tables
@@ -473,4 +473,71 @@ def to_docx(title: str, html: str, page: PageSize, resolve: Resolver = _no_resol
     _DocxWriter(doc, resolve).blocks(_Box(doc, width), parse_tree(html).children)
     buf = io.BytesIO()
     doc.save(buf)
+    return buf.getvalue()
+
+
+# ───────────── Sheets and slides ─────────────
+
+
+def to_xlsx(title: str, columns: list[str], rows: list[list[Any]]) -> bytes:
+    """One worksheet: a grey, frozen header row over the cells, numbers kept as numbers."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    book = Workbook()
+    sheet = book.active
+    assert sheet is not None
+    # Sheet names are capped at 31 characters and can't hold []:*?/\
+    sheet.title = re.sub(r"[\[\]:*?/\\]", " ", title.strip() or "Sheet")[:31].strip() or "Sheet"
+    book.properties.title = title
+    sheet.append(columns)
+    for row in rows:
+        sheet.append([None if v == "" else v for v in row])
+    fill = PatternFill("solid", start_color=HEADER_FILL, end_color=HEADER_FILL)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="000000")
+        cell.fill = fill
+        cell.alignment = Alignment(vertical="center")
+    sheet.freeze_panes = "A2"
+    for i, name in enumerate(columns, start=1):
+        longest = max([len(str(name))] + [len(str(r[i - 1])) for r in rows if i - 1 < len(r) and r[i - 1] is not None])
+        sheet.column_dimensions[get_column_letter(i)].width = min(60, max(10, longest + 2))
+    buf = io.BytesIO()
+    book.save(buf)
+    return buf.getvalue()
+
+
+def to_pptx(title: str, slides: list[dict[str, str]]) -> bytes:
+    """16:9 deck, one "Title and Content" slide each. Lines starting with "- " become bullets."""
+    from pptx import Presentation
+    from pptx.util import Inches as PptInches
+
+    deck = Presentation()
+    deck.slide_width, deck.slide_height = PptInches(13.333), PptInches(7.5)
+    deck.core_properties.title = title
+    layout = deck.slide_layouts[1]
+    for data in slides or [{"title": "", "body": ""}]:
+        slide = deck.slides.add_slide(layout)
+        heading, content = slide.placeholders[0], slide.placeholders[1]
+        # The template is 4:3; stretch its boxes across the wider slide.
+        for shape in (heading, content):
+            shape.left, shape.width = PptInches(0.75), deck.slide_width - PptInches(1.5)
+        heading.text = data.get("title", "")
+        lines = [line for line in data.get("body", "").splitlines() if line.strip()]
+        frame = content.text_frame
+        if not lines:
+            content.element.getparent().remove(content.element)
+            continue
+        for i, line in enumerate(lines):
+            para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
+            bullet = line.lstrip().startswith(("- ", "* "))
+            para.text = line.lstrip()[2:] if bullet else line.strip()
+            if not bullet:  # plain lines: no bullet glyph
+                pPr = para._p.get_or_add_pPr()
+                pPr.set("indent", "0")
+                pPr.set("marL", "0")
+                pPr.insert(0, OxmlElement("a:buNone"))
+    buf = io.BytesIO()
+    deck.save(buf)
     return buf.getvalue()

@@ -1,6 +1,6 @@
-import { type Icon } from '@phosphor-icons/react'
+import { CaretDown, Check, type Icon } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useRef, useState, type FocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 export interface Tip {
@@ -95,12 +95,24 @@ export function Popover({
 }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null)
   const panel = useRef<HTMLDivElement>(null)
+  const [opener, setOpener] = useState<HTMLElement | null>(null)
+  const toggle = (el: HTMLElement) => {
+    setOpener(el)
+    setAnchor((a) => (a ? null : el.getBoundingClientRect()))
+  }
 
   useEffect(() => {
     if (!anchor) return
     const close = () => setAnchor(null)
     const onDown = (e: MouseEvent) => {
-      if (!panel.current?.contains(e.target as Node)) close()
+      const own = panel.current
+      if (!own || own.contains(e.target as Node)) return
+      // The trigger's own click toggles it shut; closing here too would reopen it.
+      if (opener?.contains(e.target as Node)) return
+      // A popover opened from inside this one (e.g. colours in the toolbar's overflow) mounts later.
+      const other = (e.target as Element).closest?.('.float-panel')
+      if (other && own.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING) return
+      close()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close()
@@ -113,11 +125,11 @@ export function Popover({
       document.removeEventListener('keydown', onKey)
       window.removeEventListener('resize', close)
     }
-  }, [anchor])
+  }, [anchor, opener])
 
   return (
     <>
-      {trigger(anchor !== null, (el) => setAnchor((a) => (a ? null : el.getBoundingClientRect())))}
+      {trigger(anchor !== null, toggle)}
       <Float>
         <AnimatePresence>
           {anchor && (
@@ -139,5 +151,90 @@ export function Popover({
         </AnimatePresence>
       </Float>
     </>
+  )
+}
+
+export interface Choice<T> {
+  value: T
+  label: string
+  hint?: string
+  /** Inline style for the label, e.g. to preview a heading size. */
+  look?: CSSProperties
+}
+
+/** Toolbar dropdown in the same panel style as the Export menu (replaces native <select>). */
+export function Select<T extends string | number>({
+  value,
+  choices,
+  onChange,
+  tip,
+  label,
+  className,
+  grid,
+}: {
+  value: T
+  choices: Choice<T>[]
+  onChange: (value: T) => void
+  tip: Tip
+  label: string
+  className?: string
+  /** Lay short choices (like font sizes) out as a grid of this many columns. */
+  grid?: number
+}) {
+  const { bind, node } = useTooltip(tip)
+  const current = choices.find((c) => c.value === value)
+  return (
+    <Popover
+      trigger={(open, toggle) => (
+        <>
+          <button
+            type="button"
+            className={`select-trigger ${className ?? ''}`}
+            aria-label={label}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            data-open={open || undefined}
+            {...bind}
+            onMouseDown={(e) => {
+              e.preventDefault() // keep the text selection
+              bind.onMouseDown()
+            }}
+            onClick={(e) => toggle(e.currentTarget)}
+          >
+            <span className="select-value">{current?.label ?? String(value)}</span>
+            <CaretDown size={12} weight="bold" />
+          </button>
+          {node}
+        </>
+      )}
+    >
+      {(close) => (
+        <div className="select-menu" role="listbox" aria-label={label} data-grid={grid || undefined} style={grid ? { gridTemplateColumns: `repeat(${grid}, 1fr)` } : undefined}>
+          {choices.map((c) => (
+            <button
+              key={c.value}
+              type="button"
+              role="option"
+              aria-selected={c.value === value}
+              className="select-option"
+              data-active={c.value === value || undefined}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(c.value)
+                close()
+              }}
+            >
+              <span className="select-text">
+                <span className="select-label" style={c.look}>
+                  {c.label}
+                </span>
+                {c.hint && <span className="popover-hint">{c.hint}</span>}
+              </span>
+              {!grid && c.value === value && <Check size={16} weight="bold" className="select-check" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </Popover>
   )
 }

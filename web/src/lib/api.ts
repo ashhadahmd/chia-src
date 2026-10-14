@@ -114,7 +114,7 @@ export interface ImportResult {
 /** File types the import endpoint understands (keep in sync with api/app/importer.py). */
 export const IMPORT_ACCEPT = '.docx,.xlsx,.xlsm,.csv,.tsv,.pptx,.md,.markdown,.txt'
 
-export type ExportFormat = 'pdf' | 'docx'
+export type ExportFormat = 'pdf' | 'docx' | 'xlsx' | 'pptx'
 
 async function download(path: string, fallbackName: string) {
   const token = readToken()

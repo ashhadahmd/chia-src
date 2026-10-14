@@ -1,19 +1,14 @@
 import {
   ArrowClockwise,
   ArrowCounterClockwise,
-  CaretDown,
   Copy,
-  DownloadSimple,
+  DotsThreeVertical,
   Eraser,
-  FileDoc,
-  FilePdf,
   FlowArrow,
-  GoogleLogo,
   Image as ImageIcon,
   LinkSimple,
   Minus,
   Plus,
-  Printer,
   Scissors,
   TextAlignCenter,
   TextAlignJustify,
@@ -38,7 +33,7 @@ import { Placeholder, TrailingNode } from '@tiptap/extensions'
 import { EditorContent, useEditor, useEditorState, type Editor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { PAGE_SIZES, PaginationPlus } from 'tiptap-pagination-plus'
 import type { DocBody, PageSize } from '../lib/api'
@@ -47,21 +42,21 @@ import { applyTheme } from '../lib/theme'
 import { scrollToPos } from '../lib/scroll'
 import DiagramDialog from './DiagramDialog'
 import DocOutline from './DocOutline'
-import { Float, Popover, Tool, useTooltip, type Tip } from './EditorUI'
+import { Float, Popover, Select, Tool, useTooltip, type Choice, type Tip } from './EditorUI'
 import { Diagram, ImageBlock, ImageInput, insertImages } from '../lib/mediaNodes'
 import { TableBar, TableInsert } from './TableTools'
 import { canMergeCells, ChiaTableCell, ChiaTableHeader, findTable } from '../lib/table'
 import { diagramPicture, IMAGE_ACCEPT, uploadImages } from '../lib/media'
 
-const PAGES: Record<PageSize, { label: string; size: typeof PAGE_SIZES.LETTER; css: string }> = {
-  letter: { label: 'Letter', size: PAGE_SIZES.LETTER, css: 'letter' },
-  a4: { label: 'A4', size: PAGE_SIZES.A4, css: 'A4' },
+const PAGES: Record<PageSize, { label: string; hint: string; size: typeof PAGE_SIZES.LETTER; css: string }> = {
+  letter: { label: 'Letter', hint: '8.5 × 11 in, used in the US', size: PAGE_SIZES.LETTER, css: 'letter' },
+  a4: { label: 'A4', hint: '210 × 297 mm, used most elsewhere', size: PAGE_SIZES.A4, css: 'A4' },
 }
-const BLOCKS = [
-  { value: 'p', label: 'Normal text' },
-  { value: '1', label: 'Heading 1' },
-  { value: '2', label: 'Heading 2' },
-  { value: '3', label: 'Heading 3' },
+const BLOCKS: Choice<string>[] = [
+  { value: 'p', label: 'Normal text', look: { fontSize: 14 } },
+  { value: '1', label: 'Heading 1', look: { fontSize: 21, fontWeight: 800 } },
+  { value: '2', label: 'Heading 2', look: { fontSize: 18, fontWeight: 750 } },
+  { value: '3', label: 'Heading 3', look: { fontSize: 15.5, fontWeight: 700 } },
 ]
 const OUTLINE_KEY = 'chia.outline'
 const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48]
@@ -89,18 +84,7 @@ const TEXT_COLORS: { name: string; label: string; hex: string }[] = [
 ]
 const colorValue = (c: (typeof TEXT_COLORS)[number]) => `var(--tc-${c.name}, ${c.hex})`
 
-const PDF_BACKGROUNDS = [
-  { value: '#F7F4ED', label: 'Oat paper' },
-  { value: '#FFFFFF', label: 'White' },
-  { value: '#EFE6D6', label: 'Sand' },
-  { value: '#E6EBDF', label: 'Sage mist' },
-  { value: '#1A1916', label: 'Espresso' },
-]
 
-export interface DocActions {
-  exportFile: (format: 'pdf' | 'docx', background?: string) => Promise<void>
-  exportGoogle: (() => Promise<void>) | null // null when Google is not connected
-}
 
 /* ───────────── Formatting state ───────────── */
 
@@ -140,20 +124,18 @@ function stepSize(editor: Editor, current: number, dir: 1 | -1) {
 /* ───────────── Controls ───────────── */
 
 function SizeStepper({ editor, size }: { editor: Editor; size: number }) {
-  const { bind, node } = useTooltip({ label: 'Font size', hint: 'Pick an exact size in points' })
   return (
     <div className="size-stepper" role="group" aria-label="Font size">
       <Tool icon={Minus} tip={{ label: 'Smaller text', hint: 'Step the font size down' }} disabled={size <= SIZES[0]} onClick={() => stepSize(editor, size, -1)} />
-      <label className="size-value" {...bind}>
-        <select value={SIZES.includes(size) ? size : DEFAULT_SIZE} onChange={(e) => setSize(editor, Number(e.target.value))} aria-label="Font size">
-          {SIZES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </label>
-      {node}
+      <Select
+        className="size-value"
+        label="Font size"
+        tip={{ label: 'Font size', hint: 'Pick an exact size in points' }}
+        value={SIZES.includes(size) ? size : DEFAULT_SIZE}
+        choices={SIZES.map((s) => ({ value: s, label: String(s) }))}
+        onChange={(s) => setSize(editor, s)}
+        grid={4}
+      />
       <Tool icon={Plus} tip={{ label: 'Larger text', hint: 'Step the font size up' }} disabled={size >= SIZES.at(-1)!} onClick={() => stepSize(editor, size, 1)} />
     </div>
   )
@@ -220,85 +202,6 @@ function ColorTool({ editor, color }: { editor: Editor; color: string | null }) 
   )
 }
 
-function ExportMenu({ actions }: { actions: DocActions }) {
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const { bind, node } = useTooltip({ label: 'Export', hint: 'Download as PDF or Word, or open in Google Docs' })
-  const run = async (key: string, fn: () => Promise<void>, close: () => void) => {
-    setBusy(key)
-    setError(null)
-    try {
-      await fn()
-      close()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Export failed')
-    } finally {
-      setBusy(null)
-    }
-  }
-  return (
-    <Popover
-      align="right"
-      trigger={(open, toggle) => (
-        <>
-          <button type="button" className="btn btn-ghost btn-sm" aria-expanded={open} {...bind} onClick={(e) => toggle(e.currentTarget)}>
-            <DownloadSimple size={16} weight="bold" /> Export <CaretDown size={12} weight="bold" />
-          </button>
-          {node}
-        </>
-      )}
-    >
-      {(close) => (
-        <div className="export-menu">
-          <div className="export-group">
-            <span className="export-title">
-              <FilePdf size={18} weight="fill" /> PDF
-            </span>
-            <span className="export-hint">Pick a page colour</span>
-            <div className="export-swatches">
-              {PDF_BACKGROUNDS.map((bg) => (
-                <button
-                  key={bg.value}
-                  className="export-swatch"
-                  style={{ background: bg.value }}
-                  title={bg.label}
-                  aria-label={`PDF on ${bg.label}`}
-                  disabled={busy !== null}
-                  data-busy={busy === bg.value || undefined}
-                  onClick={() => run(bg.value, () => actions.exportFile('pdf', bg.value), close)}
-                />
-              ))}
-            </div>
-          </div>
-          <button className="popover-item" disabled={busy !== null} onClick={() => run('docx', () => actions.exportFile('docx'), close)}>
-            <span className="popover-icon export-icon">
-              <FileDoc weight="fill" />
-            </span>
-            <span>
-              <span className="popover-label">Word document</span>
-              <span className="popover-hint">.docx for Microsoft Word</span>
-            </span>
-          </button>
-          <button
-            className="popover-item"
-            disabled={busy !== null || !actions.exportGoogle}
-            onClick={() => actions.exportGoogle && run('google', actions.exportGoogle, close)}
-          >
-            <span className="popover-icon export-icon">
-              <GoogleLogo weight="bold" />
-            </span>
-            <span>
-              <span className="popover-label">Google Docs</span>
-              <span className="popover-hint">{actions.exportGoogle ? 'Opens your Drive copy' : 'Connect Google to enable'}</span>
-            </span>
-          </button>
-          {busy && <p className="export-status">Preparing…</p>}
-          {error && <p className="form-error export-status">{error}</p>}
-        </div>
-      )}
-    </Popover>
-  )
-}
 
 /* ───────────── Toolbar (rendered inside the editor's top bar) ───────────── */
 
@@ -306,49 +209,112 @@ interface ToolbarProps {
   editor: Editor
   page: PageSize
   onPage: (p: PageSize) => void
-  actions: DocActions
   onCopyLink: () => void
   onImages: (files: File[]) => void
   onDiagram: () => void
 }
 
-function Toolbar({ editor, page, onPage, actions, onCopyLink, onImages, onDiagram }: ToolbarProps) {
+function Toolbar({ editor, page, onPage, onCopyLink, onImages, onDiagram }: ToolbarProps) {
   const picker = useRef<HTMLInputElement>(null)
   const f = useFormat(editor)
   const c = () => editor.chain().focus()
-  const pageTip = useTooltip({ label: 'Page size', hint: 'Paper size used for printing and export' })
-  const styleTip = useTooltip({ label: 'Style', hint: 'Normal text or a heading. Headings build the outline', keys: 'Ctrl+Alt+1–3' })
   const setBlock = (value: string) =>
     value === 'p' ? c().setParagraph().run() : c().setHeading({ level: Number(value) as 1 | 2 | 3 }).run()
-  return (
-    <div className="doc-toolbar" role="toolbar" aria-label="Formatting">
+
+  // Groups in Google Docs order; the ones that don't fit move into the ⋮ menu, last first.
+  const groups: ReactNode[] = [
+    <Fragment key="history">
       <Tool icon={ArrowCounterClockwise} tip={{ label: 'Undo', hint: 'Reverse your last change', keys: 'Ctrl+Z' }} disabled={!f.canUndo} onClick={() => c().undo().run()} />
       <Tool icon={ArrowClockwise} tip={{ label: 'Redo', hint: 'Bring back what you undid', keys: 'Ctrl+Shift+Z' }} disabled={!f.canRedo} onClick={() => c().redo().run()} />
-      <span className="tool-divider" />
-      <label className="page-select style-select" {...styleTip.bind}>
-        <select value={f.block} onChange={(e) => setBlock(e.target.value)} aria-label="Style">
-          {BLOCKS.map((b) => (
-            <option key={b.value} value={b.value}>
-              {b.label}
-            </option>
-          ))}
-        </select>
-        <CaretDown size={12} weight="bold" />
-      </label>
-      {styleTip.node}
-      <SizeStepper editor={editor} size={f.size} />
-      <span className="tool-divider" />
+    </Fragment>,
+    <Fragment key="style">
+      <Select
+        className="style-select"
+        label="Style"
+        tip={{ label: 'Style', hint: 'Normal text or a heading. Headings build the outline', keys: 'Ctrl+Alt+1–3' }}
+        value={f.block}
+        choices={BLOCKS}
+        onChange={setBlock}
+      />
+    </Fragment>,
+    <SizeStepper key="size" editor={editor} size={f.size} />,
+    <Fragment key="text">
       <Tool icon={TextB} tip={{ label: 'Bold', hint: 'Make text heavier', keys: 'Ctrl+B' }} active={f.bold} onClick={() => c().toggleBold().run()} />
       <Tool icon={TextItalic} tip={{ label: 'Italic', hint: 'Slant text for emphasis', keys: 'Ctrl+I' }} active={f.italic} onClick={() => c().toggleItalic().run()} />
       <Tool icon={TextUnderline} tip={{ label: 'Underline', hint: 'Draw a line under text', keys: 'Ctrl+U' }} active={f.underline} onClick={() => c().toggleUnderline().run()} />
       <ColorTool editor={editor} color={f.color} />
+    </Fragment>,
+    <Fragment key="insert">
       <Tool icon={LinkSimple} tip={{ label: 'Link to selection', hint: 'Copy a link that opens this doc right at the selected text' }} disabled={f.empty} onClick={onCopyLink} />
-      <span className="tool-divider" />
+      <Tool icon={ImageIcon} tip={{ label: 'Image', hint: 'Add a picture. You can also paste or drop one into the page' }} onClick={() => picker.current?.click()} />
+      <TableInsert editor={editor} />
+      <Tool icon={FlowArrow} tip={{ label: 'Diagram', hint: 'Flowcharts, timelines, mind maps and more, drawn in Chia’s style' }} onClick={onDiagram} />
+    </Fragment>,
+    <Fragment key="align">
       {ALIGNS.map((a) => (
         <Tool key={a.value} icon={a.icon} tip={a.tip} active={f.align === a.value} onClick={() => c().setTextAlign(a.value).run()} />
       ))}
-      <span className="tool-divider" />
-      <Tool icon={ImageIcon} tip={{ label: 'Image', hint: 'Add a picture. You can also paste or drop one into the page' }} onClick={() => picker.current?.click()} />
+    </Fragment>,
+    <Fragment key="page">
+      <Select
+        label="Page size"
+        tip={{ label: 'Page size', hint: 'Paper size used for printing and export' }}
+        value={page}
+        choices={(Object.keys(PAGES) as PageSize[]).map((k) => ({ value: k, label: PAGES[k].label, hint: PAGES[k].hint }))}
+        onChange={onPage}
+      />
+    </Fragment>,
+  ]
+  const { row, fit } = useFit(groups.length)
+  const moreTip = useTooltip({ label: 'More tools', hint: 'Tools that don’t fit this window' })
+
+  return (
+    <div className="doc-toolbar" role="toolbar" aria-label="Formatting" ref={row}>
+      {groups.slice(0, fit).map((g, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="tool-divider" />}
+          <div className="tool-group" data-group={i}>
+            {g}
+          </div>
+        </Fragment>
+      ))}
+      {fit < groups.length && (
+        <>
+          <Popover
+            align="right"
+            trigger={(open, toggle) => (
+              <>
+                <button
+                  type="button"
+                  className="tool toolbar-more"
+                  data-active={open || undefined}
+                  aria-label="More tools"
+                  aria-expanded={open}
+                  {...moreTip.bind}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    moreTip.bind.onMouseDown()
+                  }}
+                  onClick={(e) => toggle(e.currentTarget)}
+                >
+                  <DotsThreeVertical size={18} weight="bold" />
+                </button>
+                {moreTip.node}
+              </>
+            )}
+          >
+            {() => (
+              <div className="toolbar-overflow" role="toolbar" aria-label="More tools">
+                {groups.slice(fit).map((g, i) => (
+                  <div className="tool-group" key={fit + i}>
+                    {g}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Popover>
+        </>
+      )}
       <input
         ref={picker}
         type="file"
@@ -361,25 +327,44 @@ function Toolbar({ editor, page, onPage, actions, onCopyLink, onImages, onDiagra
           if (files.length) onImages(files)
         }}
       />
-      <TableInsert editor={editor} />
-      <Tool icon={FlowArrow} tip={{ label: 'Diagram', hint: 'Flowcharts, timelines, mind maps and more, drawn in Chia’s style' }} onClick={onDiagram} />
-      <span className="tool-divider" />
-      <label className="page-select" {...pageTip.bind}>
-        <select value={page} onChange={(e) => onPage(e.target.value as PageSize)} aria-label="Page size">
-          {(Object.keys(PAGES) as PageSize[]).map((k) => (
-            <option key={k} value={k}>
-              {PAGES[k].label}
-            </option>
-          ))}
-        </select>
-        <CaretDown size={12} weight="bold" />
-      </label>
-      {pageTip.node}
-      <span className="tool-spacer" />
-      <Tool icon={Printer} tip={{ label: 'Print', hint: 'Print this document', keys: 'Ctrl+P' }} onClick={() => window.print()} />
-      <ExportMenu actions={actions} />
     </div>
   )
+}
+
+const DIVIDER = 13 // .tool-divider: 1px + 6px margins
+const MORE = 32
+
+/** How many toolbar groups fit in one row, keeping room for the ⋮ button when some don't. */
+function useFit(count: number) {
+  const row = useRef<HTMLDivElement>(null)
+  const widths = useRef<number[]>([])
+  const [fit, setFit] = useState(count)
+
+  useLayoutEffect(() => {
+    const el = row.current
+    if (!el) return
+    const measure = () => {
+      // Every group is on screen at first, so each has a width by the time any is hidden.
+      el.querySelectorAll<HTMLElement>(':scope > .tool-group').forEach((g) => {
+        widths.current[Number(g.dataset.group)] = g.offsetWidth
+      })
+      const style = getComputedStyle(el)
+      const room = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+      const total = (n: number) => widths.current.slice(0, n).reduce((a, w, i) => a + w + (i ? DIVIDER : 0), 0)
+      let n = count
+      if (total(count) > room) {
+        n = count - 1
+        while (n > 0 && total(n) + DIVIDER + MORE > room) n--
+      }
+      setFit(n)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [count])
+
+  return { row, fit }
 }
 
 /* ───────────── Right-click format menu ───────────── */
@@ -525,12 +510,10 @@ function ContextMenu({ editor, at, onClose, onCopyLink }: { editor: Editor; at: 
 export default function DocEditor({
   body,
   onChange,
-  actions,
   toolbarHost,
 }: {
   body: DocBody
   onChange: (b: DocBody) => void
-  actions: DocActions
   /** Element in the page's top bar that hosts the formatting toolbar. */
   toolbarHost: HTMLElement | null
 }) {
@@ -750,7 +733,6 @@ export default function DocEditor({
             editor={editor}
             page={page}
             onPage={changePage}
-            actions={actions}
             onCopyLink={copyLink}
             onImages={(files) => void addImages(files)}
             onDiagram={() => setDiagram({ pos: null, code: '' })}
