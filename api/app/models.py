@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+from secrets import token_urlsafe
 from uuid import uuid4
 
-from sqlmodel import JSON, Column, Field, SQLModel
+from sqlmodel import JSON, Column, Field, LargeBinary, SQLModel
 
 
 def utcnow() -> datetime:
@@ -23,7 +24,8 @@ class PageSize(StrEnum):
 
 # Content shapes. Chia's DB is the source of truth; Google Drive holds a backup mirror.
 #   doc    -> {"html": str, "page": "letter" | "a4"}   (html from the editor: p, h1-h3,
-#             lists, strong/em/u, <span style="font-size">, text-align)
+#             lists, strong/em/u, <span style="font-size">, text-align, tables, images
+#             <img src="/api/assets/{id}"> and diagrams <figure data-type="diagram">)
 #   sheet  -> {"columns": [str], "rows": [[str | number | bool | null]]}
 #   slides -> {"slides": [{"title": str, "body": str}]}
 EMPTY_CONTENT: dict[DocKind, dict[str, Any]] = {
@@ -84,6 +86,18 @@ class Document(SQLModel, table=True):
     backup_error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class Asset(SQLModel, table=True):
+    """An image used in a doc. Served at /api/assets/{id}; the long random id is the access
+    key, because <img> requests can't carry the bearer token."""
+
+    id: str = Field(default_factory=lambda: token_urlsafe(24), primary_key=True)
+    owner_id: int = Field(foreign_key="user.id", index=True)
+    media_type: str
+    sha256: str = Field(index=True)
+    data: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 GOOGLE_URLS = {

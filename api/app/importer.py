@@ -5,9 +5,9 @@ worksheet); PowerPoint (.pptx) becomes slides. Google Docs/Sheets/Slides are fet
 .docx/.xlsx/.pptx and go through the same converters.
 
 Chia's editor keeps formatting simple, so imports keep what it can show: headings, lists,
-bold/italic/underline, font size, alignment, page size and text colour (snapped to Chia's
-palette so it stays readable in dark mode). Images, charts and tables-in-docs are reduced or
-skipped, and each import reports what it left out.
+bold/italic/underline, font size, alignment, page size, text colour (snapped to Chia's
+palette so it stays readable in dark mode), tables (merged cells and column widths included)
+and pictures. Each import reports what it left out.
 """
 
 import csv
@@ -17,6 +17,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from html import escape
+from collections.abc import Callable
 from pathlib import PurePath
 from typing import Any
 from urllib.parse import unquote
@@ -47,6 +48,10 @@ LEGACY = {
 ACCEPTED = (".docx", ".xlsx", ".xlsm", ".csv", ".tsv", ".pptx", ".md", ".markdown", ".txt")
 
 
+# Saves image bytes (PNG/JPEG/GIF) and returns the URL a doc can use, or None to skip it.
+StoreImage = Callable[[bytes], str | None]
+
+
 @dataclass
 class Imported:
     kind: DocKind
@@ -60,7 +65,7 @@ class Result:
     notes: list[str] = field(default_factory=list)
 
 
-def convert(filename: str, data: bytes) -> Result:
+def convert(filename: str, data: bytes, store_image: StoreImage | None = None) -> Result:
     path = PurePath(filename or "Untitled")
     ext, title = path.suffix.lower(), path.stem.strip() or "Untitled"
     if ext in LEGACY:
@@ -70,7 +75,7 @@ def convert(filename: str, data: bytes) -> Result:
     try:
         match ext:
             case ".docx":
-                return _docx(title, _office(data, ext))
+                return _docx(title, _office(data, ext), store_image)
             case ".xlsx" | ".xlsm":
                 return _xlsx(title, _office(data, ext))
             case ".pptx":
@@ -178,19 +183,47 @@ def _inline(segments: list[tuple[str, _Style]]) -> str:
     return "".join(html)
 
 
-def _docx(title: str, data: bytes) -> Result:
+_IMAGE_KEEP = {"image/png", "image/jpeg", "image/gif"}
+EDITOR_WIDTH_PX = 624  # the editor's text column (6.5in at 96 dpi)
+
+
+def _web_image(blob: bytes, content_type: str) -> bytes | None:
+    """PNG/JPEG/GIF pass through; other raster formats (BMP, TIFF, WebP) become PNG.
+    Vector formats Word uses (EMF/WMF) can't be drawn here and return None."""
+    if content_type in _IMAGE_KEEP:
+        return blob
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(blob)) as img:
+            img.load()
+            out = io.BytesIO()
+            img.convert("RGBA" if "A" in img.getbands() else "RGB").save(out, "PNG", optimize=True)
+            return out.getvalue()
+    except Exception:
+        return None
+
+
+def _docx(title: str, data: bytes, store_image: StoreImage | None) -> Result:
     from docx import Document as load_docx
     from docx.enum.style import WD_STYLE_TYPE
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
-    from docx.table import Table
+    from docx.table import Table, _Cell
     from docx.text.hyperlink import Hyperlink
 
     doc = load_docx(io.BytesIO(data))
     notes: list[str] = []
-    images = tables = 0
+    skipped_images = nested_tables = 0
+    split_tables = 0  # tables whose vertical merges were split
     normal = doc.styles.default(WD_STYLE_TYPE.PARAGRAPH)
     base_pt = normal.font.size.pt if normal is not None and normal.font.size else DEFAULT_PT
+    section = doc.sections[0] if doc.sections else None
+    text_width_emu = (
+        section.page_width - section.left_margin - section.right_margin
+        if section is not None and section.page_width and section.left_margin is not None and section.right_margin is not None
+        else 5943600  # 6.5in
+    )
 
     def numbering_format(p: Any) -> str | None:
         """'bullet', a number format, or None when the paragraph isn't in a list."""
@@ -233,15 +266,42 @@ def _docx(title: str, data: bytes) -> Result:
             color=color,
         )
 
-    def paragraph_html(p: Any, heading: bool) -> str:
-        nonlocal images
+    def picture_html(run: Any, part: Any) -> list[str]:
+        """<img> blocks for the pictures in a run, sized relative to the text column."""
+        nonlocal skipped_images
+        out: list[str] = []
+        for drawing in run._r.findall(f".//{qn('w:drawing')}") + run._r.findall(f".//{qn('w:pict')}"):
+            blips = drawing.findall(f".//{qn('a:blip')}")
+            rid = blips[0].get(qn("r:embed")) if blips else None
+            if rid is None:
+                vml = drawing.findall(".//{urn:schemas-microsoft-com:vml}imagedata")
+                rid = vml[0].get(qn("r:id")) if vml else None
+            image_part = part.related_parts.get(rid) if rid else None
+            blob = _web_image(image_part.blob, image_part.content_type) if image_part is not None else None
+            src = store_image(blob) if blob is not None and store_image is not None else None
+            if src is None:
+                skipped_images += 1
+                continue
+            width = ""
+            extents = drawing.findall(f".//{qn('wp:extent')}")
+            if extents and (cx := extents[0].get("cx")) and text_width_emu:
+                percent = min(100, max(5, round(int(cx) / text_width_emu * 100)))
+                width = f' data-width="{percent}" style="width: {percent}%"'
+            alt = ""
+            for prop in drawing.findall(f".//{qn('wp:docPr')}"):
+                alt = prop.get("descr") or prop.get("title") or ""
+            out.append(f'<img src="{escape(src)}" alt="{escape(alt)}" data-align="center"{width}>')
+        return out
+
+    def paragraph_html(p: Any, heading: bool, part: Any) -> tuple[str, list[str]]:
         segments: list[tuple[str, _Style]] = []
+        pictures: list[str] = []
         for item in p.iter_inner_content():
             runs = item.runs if isinstance(item, Hyperlink) else [item]
             for run in runs:
-                images += len(run._r.findall(f".//{qn('w:drawing')}")) + len(run._r.findall(f".//{qn('w:pict')}"))
+                pictures += picture_html(run, part)
                 segments.append((run.text, run_style(run, heading)))
-        return _inline(segments)
+        return _inline(segments), pictures
 
     def alignment_attr(p: Any) -> str:
         align = p.alignment if p.alignment is not None else (p.style.paragraph_format.alignment if p.style is not None else None)
@@ -253,62 +313,131 @@ def _docx(title: str, data: bytes) -> Result:
         }.get(align)
         return f' style="text-align: {value}"' if value else ""
 
-    blocks: list[str] = []
-    open_list: str | None = None
+    def all_bold(row: Any) -> bool:
+        runs = [r for tc in row.tc_lst for r in tc.iter(qn("w:r")) if "".join(t.text or "" for t in r.iter(qn("w:t"))).strip()]
+        return bool(runs) and all(
+            (rpr := r.find(qn("w:rPr"))) is not None and (b := rpr.find(qn("w:b"))) is not None and b.get(qn("w:val")) not in ("0", "false")
+            for r in runs
+        )
 
-    def close_list() -> None:
-        nonlocal open_list
-        if open_list:
-            blocks.append(f"</{open_list}>")
-            open_list = None
+    def table_html(table: Any) -> str:
+        tbl = table._tbl
+        grid = [int(c.w or 0) for c in tbl.tblGrid.gridCol_lst] if tbl.tblGrid is not None else []
+        twips_total = sum(grid)
+        scale = min(1.0, EDITOR_WIDTH_PX / (twips_total / 15)) if twips_total else 1.0
+        col_px = [max(40, round(w / 15 * scale)) for w in grid]
 
-    for block in doc.iter_inner_content():
-        if isinstance(block, Table):
-            tables += 1
-            close_list()
-            for row in block.rows:
-                cells: list[str] = []
-                for cell in row.cells:  # merged cells repeat; keep each once
-                    text = cell.text.strip()
-                    if text and (not cells or cells[-1] != text):
-                        cells.append(text)
-                if cells:
-                    blocks.append(f"<p>{escape('  ·  '.join(cells))}</p>")
-            continue
+        # Every row as a list of (first grid column, <w:tc>), for column widths.
+        layout: list[list[tuple[int, Any]]] = []
+        for tr in tbl.tr_lst:
+            cells, col = [], 0
+            tr_pr = tr.trPr
+            if tr_pr is not None and (before := tr_pr.find(qn("w:gridBefore"))) is not None:
+                col = int(before.get(qn("w:val")) or 0)
+            for tc in tr.tc_lst:
+                cells.append((col, tc))
+                col += tc.grid_span
+            layout.append(cells)
 
-        style_name = (block.style.name if block.style is not None else "") or ""
-        level = 0
-        if style_name == "Title":
-            level = 1
-        elif m := re.fullmatch(r"Heading (\d)", style_name):
-            level = min(int(m.group(1)), 3)
-        fmt = None if level else numbering_format(block)
-        body = paragraph_html(block, heading=bool(level))
+        nonlocal split_tables
+        split = False
+        rows_html = []
+        for r, (tr, cells) in enumerate(zip(tbl.tr_lst, layout, strict=True)):
+            tr_pr = tr.trPr
+            header = (tr_pr is not None and tr_pr.find(qn("w:tblHeader")) is not None) or (r == 0 and len(layout) > 1 and all_bold(tr))
+            tag = "th" if header else "td"
+            out = []
+            for col, tc in cells:
+                span = tc.grid_span
+                attrs = f' colspan="{span}"' if span > 1 else ""
+                widths = col_px[col : col + span]
+                if len(widths) == span:
+                    attrs += f' colwidth="{",".join(map(str, widths))}"'
+                if tc.vMerge == "continue":  # Chia pages tables row by row, so vertical merges split
+                    split = True
+                    out.append(f"<{tag}{attrs}><p></p></{tag}>")
+                    continue
+                inner = blocks_html(_Cell(tc, table).iter_inner_content(), part=table.part, in_table=True)
+                if header:  # header cells are bold already
+                    inner = inner.replace("<strong>", "").replace("</strong>", "")
+                out.append(f"<{tag}{attrs}>{inner or '<p></p>'}</{tag}>")
+            if out:
+                rows_html.append(f"<tr>{''.join(out)}</tr>")
+        split_tables += split
+        return f"<table><tbody>{''.join(rows_html)}</tbody></table>" if rows_html else ""
 
-        if fmt:
-            tag = "ul" if fmt in ("bullet", "none") else "ol"
-            if open_list != tag:
+    def blocks_html(items: Any, part: Any, in_table: bool = False) -> str:
+        nonlocal nested_tables
+        blocks: list[str] = []
+        open_list: str | None = None
+
+        def close_list() -> None:
+            nonlocal open_list
+            if open_list:
+                blocks.append(f"</{open_list}>")
+                open_list = None
+
+        for block in items:
+            if isinstance(block, Table):
                 close_list()
-                blocks.append(f"<{tag}>")
-                open_list = tag
-            blocks.append(f"<li><p{alignment_attr(block)}>{body}</p></li>")
-            continue
+                if in_table:  # tables inside table cells become lines of text
+                    nested_tables += 1
+                    for row in block.rows:
+                        cells: list[str] = []
+                        for cell in row.cells:  # merged cells repeat; keep each once
+                            text = cell.text.strip()
+                            if text and (not cells or cells[-1] != text):
+                                cells.append(text)
+                        if cells:
+                            blocks.append(f"<p>{escape('  ·  '.join(cells))}</p>")
+                else:
+                    blocks.append(table_html(block))
+                continue
+
+            style_name = (block.style.name if block.style is not None else "") or ""
+            level = 0
+            if style_name == "Title":
+                level = 1
+            elif m := re.fullmatch(r"Heading (\d)", style_name):
+                level = min(int(m.group(1)), 3)
+            fmt = None if level else numbering_format(block)
+            body, pictures = paragraph_html(block, heading=bool(level), part=part)
+            text = body if body.strip() else ""
+
+            if fmt:
+                tag = "ul" if fmt in ("bullet", "none") else "ol"
+                if open_list != tag:
+                    close_list()
+                    blocks.append(f"<{tag}>")
+                    open_list = tag
+                blocks.append(f"<li><p{alignment_attr(block)}>{body}</p>{''.join(pictures)}</li>")
+                continue
+            close_list()
+            if text or not pictures:
+                tag = f"h{level}" if level else "p"
+                blocks.append(f"<{tag}{alignment_attr(block)}>{body}</{tag}>")
+            blocks.extend(pictures)
         close_list()
-        tag = f"h{level}" if level else "p"
-        blocks.append(f"<{tag}{alignment_attr(block)}>{body}</{tag}>")
-    close_list()
+        if in_table:  # Word ends every cell with a paragraph, often an empty one
+            while len(blocks) > 1 and blocks[-1] == "<p></p>":
+                blocks.pop()
+        return "".join(blocks)
+
+    html = blocks_html(doc.iter_inner_content(), part=doc.part)
 
     page = PageSize.letter
-    if doc.sections and doc.sections[0].page_width is not None:
-        width_in = doc.sections[0].page_width.inches
+    if section is not None and section.page_width is not None:
+        width_in = section.page_width.inches
         if abs(width_in - 8.27) < 0.15 or abs(width_in - 11.69) < 0.15:
             page = PageSize.a4
 
-    if images:
-        notes.append(f"{_plural(images, 'image')} left out — Chia docs are text only")
-    if tables:
-        notes.append(f"{_plural(tables, 'table')} turned into plain lines")
-    return Result([Imported(DocKind.doc, title, {"html": "".join(blocks) or "<p></p>", "page": page})], notes)
+    if skipped_images:
+        notes.append(f"{_plural(skipped_images, 'image')} left out (drawings Chia can't show, such as Word shapes or EMF pictures)")
+    if split_tables:
+        notes.append(f"Cells merged down a column in {_plural(split_tables, 'table')} were split; the text stays in the top cell")
+    if nested_tables:
+        notes.append(f"{_plural(nested_tables, 'table')} inside other tables turned into plain lines")
+    return Result([Imported(DocKind.doc, title, {"html": html or "<p></p>", "page": page})], notes)
 
 
 # ───────────── Sheets ─────────────

@@ -10,6 +10,7 @@ import threading
 from sqlmodel import Session, col, or_, select
 
 from app.db import engine
+from app import assets
 from app.export import resolve_colors
 from app.google import oauth, workspace
 from app.models import DocKind, Document, GoogleAccount, utcnow
@@ -70,6 +71,7 @@ def backup_now(doc_id: str) -> Document | None:
 
             if doc.kind is DocKind.doc:
                 html = resolve_colors(content.get("html", ""))
+                html = assets.inline(html, assets.resolver(session, doc.owner_id, html))
                 if file_id:
                     workspace.update_doc(creds, file_id, doc.title, html)
                 else:

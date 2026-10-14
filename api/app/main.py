@@ -10,7 +10,7 @@ from app.db import init_db
 from app.documents import DocumentError
 from app.google import backup
 from app.mcp_server import mcp, mcp_app
-from app.routes import auth, documents, google, keys
+from app.routes import assets, auth, documents, google, keys
 
 
 @asynccontextmanager
@@ -31,6 +31,7 @@ app.add_middleware(
 )
 
 api = APIRouter(prefix="/api")
+api.include_router(assets.router)
 api.include_router(auth.router)
 api.include_router(documents.router)
 api.include_router(google.router)

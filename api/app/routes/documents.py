@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from app import documents, export, importer
+from app import assets, documents, export, importer
 from app.db import SessionDep
 from app.deps import CurrentUser
 from app.documents import DocumentError
@@ -71,6 +71,16 @@ class GoogleImport(BaseModel):
 _FILE_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 
 
+def _image_store(session: SessionDep, user_id: int) -> importer.StoreImage:
+    def store(data: bytes) -> str | None:
+        try:
+            return assets.url(assets.store(session, user_id, data))
+        except DocumentError:  # too large or an unusable format
+            return None
+
+    return store
+
+
 def _save(session: SessionDep, user_id: int, result: importer.Result) -> ImportResult:
     docs = [documents.create_document(session, user_id, i.kind, i.title, i.content) for i in result.items]
     return ImportResult(documents=[DocumentSummary.of(d) for d in docs], notes=result.notes)
@@ -83,7 +93,7 @@ def import_file(file: UploadFile, session: SessionDep, user: CurrentUser) -> Imp
     data = file.file.read(importer.MAX_UPLOAD + 1)
     if len(data) > importer.MAX_UPLOAD:
         raise DocumentError(413, "That file is larger than 25 MB")
-    return _save(session, user.id, importer.convert(file.filename or "", data))
+    return _save(session, user.id, importer.convert(file.filename or "", data, _image_store(session, user.id)))
 
 
 def _from_drive(session: SessionDep, user_id: int, file_id: str) -> tuple[str, bytes]:
@@ -129,7 +139,7 @@ def import_google(body: GoogleImport, session: SessionDep, user: CurrentUser) ->
             name, data = fetched or importer.fetch_public(editor or "", file_id)
     except oauth.GoogleReconnectRequired as exc:
         raise DocumentError(409, str(exc)) from exc
-    return _save(session, user.id, importer.convert(name, data))
+    return _save(session, user.id, importer.convert(name, data, _image_store(session, user.id)))
 
 
 # ───────────── Export ─────────────
@@ -163,14 +173,16 @@ async def export_pdf(
         bg = export.parse_background(background)
     except ValueError as exc:
         raise DocumentError(422, str(exc)) from exc
-    pdf = await run_in_threadpool(export.to_pdf, doc.title, html, page, bg)
+    resolve = assets.resolver(session, doc.owner_id, html)
+    pdf = await run_in_threadpool(export.to_pdf, doc.title, html, page, bg, resolve)
     return _download(pdf, doc.title, "pdf", "application/pdf")
 
 
 @router.get("/{doc_id}/export/docx")
 async def export_docx(doc_id: str, session: SessionDep, user: CurrentUser) -> Response:
     doc, html, page = _text_doc(session, user, doc_id)
-    data = await run_in_threadpool(export.to_docx, doc.title, html, page)
+    resolve = assets.resolver(session, doc.owner_id, html)
+    data = await run_in_threadpool(export.to_docx, doc.title, html, page, resolve)
     return _download(data, doc.title, "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 

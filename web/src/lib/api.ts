@@ -132,6 +132,11 @@ async function download(path: string, fallbackName: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+/** Docs store images as /api/assets/{id}; the browser needs the API's origin in front. */
+export function assetUrl(src: string): string {
+  return src.startsWith('/api/') ? `${BASE_URL}${src}` : src
+}
+
 /** Full-page browser navigation to the API (OAuth needs a top-level redirect). */
 export const googleSignInUrl = `${BASE_URL}/api/auth/google`
 
@@ -162,6 +167,11 @@ export const api = {
   },
   importGoogle: (source: { url: string } | { file_id: string }) =>
     request<ImportResult>('/api/documents/import/google', { method: 'POST', body: JSON.stringify(source) }),
+  uploadAsset: (image: Blob, name = 'image') => {
+    const body = new FormData()
+    body.append('file', image, name)
+    return request<{ id: string; url: string; media_type: string }>('/api/assets', { method: 'POST', body })
+  },
   googlePicker: () => request<PickerConfig>('/api/google/picker'),
   providers: () => request<{ google: boolean }>('/api/auth/providers'),
   googleStatus: () => request<GoogleStatus>('/api/google'),

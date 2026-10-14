@@ -4,6 +4,7 @@ Chia's DB holds every document. Users who linked Google also get a debounced bac
 in their Drive (see `app.google.backup`).
 """
 
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -11,9 +12,11 @@ from markdown_it import MarkdownIt
 from pydantic import BaseModel, ValidationError
 from sqlmodel import Session, col, select
 
+from app import assets
 from app.google import backup, oauth
 from app.models import (
     EMPTY_CONTENT,
+    Asset,
     DocKind,
     Document,
     DocumentRead,
@@ -54,8 +57,13 @@ class _Slides(BaseModel):
 _SHAPES: dict[DocKind, type[BaseModel]] = {DocKind.doc: _Doc, DocKind.sheet: _Sheet, DocKind.slides: _Slides}
 
 
+_MERMAID = re.compile(r'<pre><code class="language-mermaid">(.*?)</code></pre>', re.DOTALL)
+
+
 def markdown_to_html(markdown: str) -> str:
-    return _md.render(markdown)
+    """Markdown to editor HTML; ```mermaid fences become diagrams, drawn when the doc opens."""
+    html = _md.render(markdown)
+    return _MERMAID.sub(lambda m: f'<figure data-type="diagram" data-code="{m.group(1).rstrip()}"></figure>', html)
 
 
 def validate_content(kind: DocKind, content: dict[str, Any]) -> dict[str, Any]:
@@ -136,8 +144,15 @@ def update_document(
 
 
 def delete_document(session: Session, doc: Document) -> None:
-    """Removes the document; its Drive mirror goes to the Drive trash (restorable for 30 days)."""
+    """Removes the document and the images only it used; its Drive mirror goes to the Drive
+    trash (restorable for 30 days)."""
     if doc.google_file_id:
         backup.trash_mirror(doc.owner_id, doc.google_file_id)
+    images = assets.ids_in([(doc.content or {}).get("html", "")])
     session.delete(doc)
+    if images:
+        others = session.exec(select(Document).where(Document.owner_id == doc.owner_id, Document.id != doc.id)).all()
+        still_used = assets.ids_in((d.content or {}).get("html", "") for d in others if d.kind is DocKind.doc)
+        for asset in session.exec(select(Asset).where(Asset.owner_id == doc.owner_id, col(Asset.id).in_(images - still_used))).all():
+            session.delete(asset)
     session.commit()

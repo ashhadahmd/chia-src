@@ -32,13 +32,19 @@ Optional, for **Import › Pick from Google Drive**: enable the Picker API (`gcl
 
 **Import** in the library (or dropping files onto it) brings in:
 
-- **Word** `.docx` as a doc: headings, lists, bold/italic/underline, font size, alignment, page size, and text colour snapped to Chia's palette. Tables become plain lines; images are left out. The toast says what was dropped.
+- **Word** `.docx` as a doc: headings, lists, bold/italic/underline, font size, alignment, page size, text colour snapped to Chia's palette, tables (header rows, cells merged across, column widths) and pictures (sized as in Word). Cells merged down a column are split, tables inside tables become plain lines, and drawings Chia can't show (Word shapes, EMF) are left out. The toast says what was changed.
 - **Excel** `.xlsx` and **CSV** as sheets: one sheet per worksheet, with formula results as values. The first 5,000 rows are kept.
 - **PowerPoint** `.pptx` as slides: titles, text and bullets.
 - **Markdown** and **text** as docs.
 - **Google Docs, Sheets and Slides** by link, either through the user's linked Google account or Google's public export for files shared "Anyone with the link". When the Picker is configured, users can also pick files from Drive.
 
 Legacy `.doc`, `.xls`, `.ppt` and OpenDocument files are refused with a "save as .docx/.xlsx/.pptx" hint. Uploads are limited to 25 MB.
+
+## Pictures, tables and diagrams
+
+- **Pictures:** toolbar **Image**, paste, or drop into the page. Large photos are scaled to 2400 px; WebP, AVIF, BMP and SVG become PNG or JPEG so every export can embed them. Select a picture to resize it (handles or S/M/L/Full), align it, add alt text or replace it. Images live in the `asset` table and are served at `/api/assets/{id}`. That URL is public by design (`<img>` can't send the bearer token), so its long random id is the key. Deleting a doc removes images no other doc uses.
+- **Tables:** toolbar **Table** (pick a size on the grid). With the cursor in a table, a bar above it adds or removes rows and columns, merges or splits cells and toggles the header row; the same tools are on right-click. Drag column edges to resize. Tables break across pages between rows, so merges stay within a row.
+- **Diagrams:** toolbar **Diagram** opens an editor with templates (flowchart, sequence, mind map, org chart, timeline, schedule, pie, quadrant, states, journey, data model, classes) and a live preview. Diagrams are written in [Mermaid](https://mermaid.js.org) and drawn in Chia's palette and type, redrawn for light or dark mode. A light-mode picture is stored with each diagram for PDF, Word and Google exports. MCP clients add diagrams as ```` ```mermaid ```` blocks in markdown; their picture is made the first time the doc is opened.
 
 ## Storage, backup and export
 
@@ -72,6 +78,6 @@ Tools: `list_documents`, `get_document`, `create_doc`, `create_sheet`, `create_s
 
 | Kind | Shape |
 | --- | --- |
-| doc | `{ "html": "...", "page": "letter" \| "a4" }`. MCP clients may send `{ "markdown": "..." }` instead. |
+| doc | `{ "html": "...", "page": "letter" \| "a4" }`. MCP clients may send `{ "markdown": "..." }` instead; pipe tables and ```` ```mermaid ```` blocks are supported. |
 | sheet | `{ "columns": [...], "rows": [[...]] }`. A value starting with `=` becomes a formula in Google Sheets. |
 | slides | `{ "slides": [{ "title", "body" }] }`. Body lines starting with `- ` become bullets in Google Slides. |

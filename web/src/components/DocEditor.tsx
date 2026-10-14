@@ -7,7 +7,9 @@ import {
   Eraser,
   FileDoc,
   FilePdf,
+  FlowArrow,
   GoogleLogo,
+  Image as ImageIcon,
   LinkSimple,
   Minus,
   Plus,
@@ -20,22 +22,36 @@ import {
   TextB,
   TextItalic,
   TextUnderline,
+  Trash,
+  ArrowsMerge,
+  ArrowsSplit,
+  ColumnsPlusLeft,
+  ColumnsPlusRight,
+  RowsPlusBottom,
+  RowsPlusTop,
   type Icon,
 } from '@phosphor-icons/react'
+import { TableKit } from '@tiptap/extension-table'
 import { TextAlign } from '@tiptap/extension-text-align'
 import { Color, FontSize, TextStyle } from '@tiptap/extension-text-style'
-import { Placeholder } from '@tiptap/extensions'
+import { Placeholder, TrailingNode } from '@tiptap/extensions'
 import { EditorContent, useEditor, useEditorState, type Editor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PAGE_SIZES, PaginationPlus } from 'tiptap-pagination-plus'
 import type { DocBody, PageSize } from '../lib/api'
 import { findPassage, makePassage, parsePassage, passageHash, passageKey, PassageHighlight } from '../lib/passage'
 import { applyTheme } from '../lib/theme'
 import { scrollToPos } from '../lib/scroll'
+import DiagramDialog from './DiagramDialog'
 import DocOutline from './DocOutline'
+import { Float, Popover, Tool, useTooltip, type Tip } from './EditorUI'
+import { Diagram, ImageBlock, ImageInput, insertImages } from '../lib/mediaNodes'
+import { TableBar, TableInsert } from './TableTools'
+import { canMergeCells, ChiaTableCell, ChiaTableHeader, findTable } from '../lib/table'
+import { diagramPicture, IMAGE_ACCEPT, uploadImages } from '../lib/media'
 
 const PAGES: Record<PageSize, { label: string; size: typeof PAGE_SIZES.LETTER; css: string }> = {
   letter: { label: 'Letter', size: PAGE_SIZES.LETTER, css: 'letter' },
@@ -51,11 +67,6 @@ const OUTLINE_KEY = 'chia.outline'
 const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48]
 const DEFAULT_SIZE = 11
 
-interface Tip {
-  label: string
-  hint?: string
-  keys?: string
-}
 
 const ALIGNS: { value: string; icon: Icon; tip: Tip }[] = [
   { value: 'left', icon: TextAlignLeft, tip: { label: 'Align left', hint: 'Line text up along the left edge', keys: 'Ctrl+Shift+L' } },
@@ -124,139 +135,6 @@ function setSize(editor: Editor, size: number) {
 function stepSize(editor: Editor, current: number, dir: 1 | -1) {
   const next = dir > 0 ? SIZES.find((s) => s > current) : [...SIZES].reverse().find((s) => s < current)
   if (next) setSize(editor, next)
-}
-
-/* ───────────── Floating layer (tooltips, popovers) ───────────── */
-
-/** Renders into <body> so toolbar overflow never clips it. */
-function Float({ children }: { children: ReactNode }) {
-  return createPortal(children, document.body)
-}
-
-function useTooltip(tip: Tip | undefined) {
-  const [rect, setRect] = useState<DOMRect | null>(null)
-  const timer = useRef<number | undefined>(undefined)
-  useEffect(() => () => window.clearTimeout(timer.current), [])
-  const show = (el: HTMLElement) => {
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setRect(el.getBoundingClientRect()), 380)
-  }
-  const hide = () => {
-    window.clearTimeout(timer.current)
-    setRect(null)
-  }
-  const bind = {
-    onMouseEnter: (e: ReactMouseEvent<HTMLElement>) => show(e.currentTarget),
-    onMouseLeave: hide,
-    onFocus: (e: FocusEvent<HTMLElement>) => {
-      if (e.currentTarget.matches(':focus-visible')) show(e.currentTarget)
-    },
-    onBlur: hide,
-    onMouseDown: hide,
-  }
-  const node =
-    tip && rect ? (
-      <Float>
-        <motion.div
-          className="tooltip"
-          role="tooltip"
-          style={{ left: Math.max(90, Math.min(rect.left + rect.width / 2, window.innerWidth - 90)), top: rect.bottom + 8 }}
-          initial={{ opacity: 0, y: -3, x: '-50%' }}
-          animate={{ opacity: 1, y: 0, x: '-50%' }}
-          transition={{ duration: 0.14, ease: 'easeOut' }}
-        >
-          <span className="tooltip-head">
-            <span className="tooltip-label">{tip.label}</span>
-            {tip.keys && <kbd>{tip.keys}</kbd>}
-          </span>
-          {tip.hint && <span className="tooltip-hint">{tip.hint}</span>}
-        </motion.div>
-      </Float>
-    ) : null
-  return { bind, node }
-}
-
-function Tool({ icon: I, tip, active, disabled, onClick }: { icon: Icon; tip: Tip; active?: boolean; disabled?: boolean; onClick: () => void }) {
-  const { bind, node } = useTooltip(tip)
-  return (
-    <>
-      <button
-        type="button"
-        className="tool"
-        data-active={active || undefined}
-        disabled={disabled}
-        aria-label={tip.label}
-        aria-pressed={active}
-        {...bind}
-        onMouseDown={(e) => {
-          e.preventDefault() // keep the text selection
-          bind.onMouseDown()
-        }}
-        onClick={onClick}
-      >
-        <I size={18} weight={active ? 'bold' : 'regular'} />
-      </button>
-      {node}
-    </>
-  )
-}
-
-function Popover({
-  trigger,
-  children,
-  align = 'left',
-}: {
-  trigger: (open: boolean, toggle: (el: HTMLElement) => void) => ReactNode
-  children: (close: () => void) => ReactNode
-  align?: 'left' | 'right'
-}) {
-  const [anchor, setAnchor] = useState<DOMRect | null>(null)
-  const panel = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!anchor) return
-    const close = () => setAnchor(null)
-    const onDown = (e: MouseEvent) => {
-      if (!panel.current?.contains(e.target as Node)) close()
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close()
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    window.addEventListener('resize', close)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-      window.removeEventListener('resize', close)
-    }
-  }, [anchor])
-
-  return (
-    <>
-      {trigger(anchor !== null, (el) => setAnchor((a) => (a ? null : el.getBoundingClientRect())))}
-      <Float>
-        <AnimatePresence>
-          {anchor && (
-            <motion.div
-              ref={panel}
-              className="popover float-panel"
-              style={
-                align === 'right'
-                  ? { top: anchor.bottom + 8, right: window.innerWidth - anchor.right, transformOrigin: 'top right' }
-                  : { top: anchor.bottom + 8, left: anchor.left, transformOrigin: 'top left' }
-              }
-              initial={{ opacity: 0, y: -6, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -4, scale: 0.97, transition: { duration: 0.1 } }}
-            >
-              {children(() => setAnchor(null))}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </Float>
-    </>
-  )
 }
 
 /* ───────────── Controls ───────────── */
@@ -430,9 +308,12 @@ interface ToolbarProps {
   onPage: (p: PageSize) => void
   actions: DocActions
   onCopyLink: () => void
+  onImages: (files: File[]) => void
+  onDiagram: () => void
 }
 
-function Toolbar({ editor, page, onPage, actions, onCopyLink }: ToolbarProps) {
+function Toolbar({ editor, page, onPage, actions, onCopyLink, onImages, onDiagram }: ToolbarProps) {
+  const picker = useRef<HTMLInputElement>(null)
   const f = useFormat(editor)
   const c = () => editor.chain().focus()
   const pageTip = useTooltip({ label: 'Page size', hint: 'Paper size used for printing and export' })
@@ -466,6 +347,22 @@ function Toolbar({ editor, page, onPage, actions, onCopyLink }: ToolbarProps) {
       {ALIGNS.map((a) => (
         <Tool key={a.value} icon={a.icon} tip={a.tip} active={f.align === a.value} onClick={() => c().setTextAlign(a.value).run()} />
       ))}
+      <span className="tool-divider" />
+      <Tool icon={ImageIcon} tip={{ label: 'Image', hint: 'Add a picture. You can also paste or drop one into the page' }} onClick={() => picker.current?.click()} />
+      <input
+        ref={picker}
+        type="file"
+        accept={IMAGE_ACCEPT}
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          e.target.value = ''
+          if (files.length) onImages(files)
+        }}
+      />
+      <TableInsert editor={editor} />
+      <Tool icon={FlowArrow} tip={{ label: 'Diagram', hint: 'Flowcharts, timelines, mind maps and more, drawn in Chia’s style' }} onClick={onDiagram} />
       <span className="tool-divider" />
       <label className="page-select" {...pageTip.bind}>
         <select value={page} onChange={(e) => onPage(e.target.value as PageSize)} aria-label="Page size">
@@ -522,6 +419,12 @@ function ContextMenu({ editor, at, onClose, onCopyLink }: { editor: Editor; at: 
     }
   }, [onClose])
 
+  const inTable = findTable(editor.state.selection) !== undefined
+  const table = (run: () => void) => {
+    run()
+    onClose()
+  }
+
   const clipboard = (cmd: 'copy' | 'cut') => {
     editor.commands.focus()
     document.execCommand(cmd)
@@ -555,35 +458,63 @@ function ContextMenu({ editor, at, onClose, onCopyLink }: { editor: Editor; at: 
             <Tool key={a.value} icon={a.icon} tip={a.tip} active={f.align === a.value} onClick={() => c().setTextAlign(a.value).run()} />
           ))}
         </div>
-        <div className="cm-sep" />
-        <button className="cm-item" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => clipboard('cut')}>
-          <Scissors size={16} /> Cut <kbd>Ctrl X</kbd>
-        </button>
-        <button className="cm-item" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => clipboard('copy')}>
-          <Copy size={16} /> Copy <kbd>Ctrl C</kbd>
-        </button>
-        <button
-          className="cm-item"
-          role="menuitem"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => {
-            onCopyLink()
-            onClose()
-          }}
-        >
-          <LinkSimple size={16} /> Copy link to selection
-        </button>
-        <button
-          className="cm-item"
-          role="menuitem"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => {
-            c().unsetAllMarks().unsetTextAlign().run()
-            onClose()
-          }}
-        >
-          <Eraser size={16} /> Clear formatting
-        </button>
+        {inTable && (
+          <>
+            <div className="cm-sep" />
+            <div className="cm-row">
+              <Tool icon={RowsPlusTop} tip={{ label: 'Row above' }} onClick={() => table(() => c().addRowBefore().run())} />
+              <Tool icon={RowsPlusBottom} tip={{ label: 'Row below' }} onClick={() => table(() => c().addRowAfter().run())} />
+              <Tool icon={ColumnsPlusLeft} tip={{ label: 'Column left' }} onClick={() => table(() => c().addColumnBefore().run())} />
+              <Tool icon={ColumnsPlusRight} tip={{ label: 'Column right' }} onClick={() => table(() => c().addColumnAfter().run())} />
+              <Tool icon={ArrowsMerge} tip={{ label: 'Merge cells' }} disabled={!canMergeCells(editor)} onClick={() => table(() => c().mergeCells().run())} />
+              <Tool icon={ArrowsSplit} tip={{ label: 'Split cell' }} disabled={!editor.can().splitCell()} onClick={() => table(() => c().splitCell().run())} />
+            </div>
+            <button className="cm-item" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => table(() => c().deleteRow().run())}>
+              <Trash size={16} /> Delete row
+            </button>
+            <button className="cm-item" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => table(() => c().deleteColumn().run())}>
+              <Trash size={16} /> Delete column
+            </button>
+            <button className="cm-item cm-danger" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => table(() => c().deleteTable().run())}>
+              <Trash size={16} /> Delete table
+            </button>
+          </>
+        )}
+        {!f.empty && (
+          <>
+            <div className="cm-sep" />
+            <button className="cm-item" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => clipboard('cut')}>
+              <Scissors size={16} /> Cut <kbd>Ctrl X</kbd>
+            </button>
+            <button className="cm-item" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => clipboard('copy')}>
+              <Copy size={16} /> Copy <kbd>Ctrl C</kbd>
+            </button>
+            <button
+              className="cm-item"
+              role="menuitem"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onCopyLink()
+                onClose()
+              }}
+            >
+              <LinkSimple size={16} /> Copy link to selection
+            </button>
+          </>
+        )}
+        {!f.empty && (
+          <button
+            className="cm-item"
+            role="menuitem"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              c().unsetAllMarks().unsetTextAlign().run()
+              onClose()
+            }}
+          >
+            <Eraser size={16} /> Clear formatting
+          </button>
+        )}
       </motion.div>
     </Float>
   )
@@ -616,7 +547,11 @@ export default function DocEditor({
     }
     return window.innerWidth >= 1180
   })
-  const [notice, setNotice] = useState<{ text: string; tone: 'done' | 'error' } | null>(null)
+  const [notice, setNotice] = useState<{ text: string; tone: 'done' | 'error' | 'busy'; icon?: Icon } | null>(null)
+  // The diagram being written: pos of an existing one, or null for a new one.
+  const [diagram, setDiagram] = useState<{ pos: number | null; code: string } | null>(null)
+  // Node views and paste handlers are created once; they call through this.
+  const media = useRef({ images: (_files: File[], _at?: number) => {}, editDiagram: (_pos: number, _code: string) => {} })
   const noticeTimer = useRef<number | undefined>(undefined)
   const latest = useRef({ onChange, page })
   const timer = useRef<number | undefined>(undefined)
@@ -629,11 +564,18 @@ export default function DocEditor({
     extensions: [
       StarterKit.configure({ link: false, code: false, codeBlock: false, strike: false, heading: { levels: [1, 2, 3] } }),
       PassageHighlight,
+      TableKit.configure({ table: { resizable: true, cellMinWidth: 48, lastColumnResizable: false }, tableCell: false, tableHeader: false }),
+      ChiaTableCell,
+      ChiaTableHeader,
+      ImageBlock,
+      ImageInput.configure({ onFiles: (files, at) => media.current.images(files, at) }),
+      Diagram.configure({ onEdit: (pos, code) => media.current.editDiagram(pos, code) }),
       TextStyle,
       FontSize,
       Color,
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
       Placeholder.configure({ placeholder: 'Start writing…' }),
+      TrailingNode, // always somewhere to type after a table, picture or diagram
       PaginationPlus.configure({
         ...PAGES[page].size,
         pageGap: 28,
@@ -653,6 +595,7 @@ export default function DocEditor({
     onUpdate: ({ editor: e }) => {
       window.clearTimeout(timer.current)
       timer.current = window.setTimeout(() => {
+        if (e.isDestroyed) return // a node view finished work after this editor was replaced
         const { onChange: emit, page: p } = latest.current
         emit({ html: e.getHTML(), page: p })
       }, 300)
@@ -667,11 +610,47 @@ export default function DocEditor({
     [],
   )
 
-  const notify = (text: string, tone: 'done' | 'error' = 'done') => {
+  const notify = (text: string, tone: 'done' | 'error' | 'busy' = 'done', icon?: Icon) => {
     window.clearTimeout(noticeTimer.current)
-    setNotice({ text, tone })
-    noticeTimer.current = window.setTimeout(() => setNotice(null), tone === 'error' ? 6000 : 3200)
+    setNotice({ text, tone, icon })
+    if (tone !== 'busy') noticeTimer.current = window.setTimeout(() => setNotice(null), tone === 'error' ? 6000 : 3200)
   }
+
+  const addImages = async (files: File[], at?: number) => {
+    if (!editor) return
+    notify(files.length > 1 ? `Adding ${files.length} pictures…` : 'Adding picture…', 'busy', ImageIcon)
+    try {
+      insertImages(editor, await uploadImages(files), at)
+      setNotice(null)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'The picture could not be added', 'error', ImageIcon)
+    }
+  }
+
+  const saveDiagram = async (code: string) => {
+    if (!editor || !diagram) return
+    const picture = await diagramPicture(code)
+    const at = diagram.pos
+    const existing = at === null ? null : editor.state.doc.nodeAt(at)
+    if (at !== null && existing?.type.name === 'diagram') {
+      editor
+        .chain()
+        .focus()
+        .command(({ tr }) => {
+          tr.setNodeMarkup(at, undefined, { ...existing.attrs, code, src: picture.src, natural: picture.natural })
+          return true
+        })
+        .setNodeSelection(at)
+        .run()
+    } else {
+      editor.chain().focus().insertContent({ type: 'diagram', attrs: { code, src: picture.src, natural: picture.natural } }).run()
+    }
+    setDiagram(null)
+  }
+
+  useEffect(() => {
+    media.current = { images: addImages, editDiagram: (pos, code) => setDiagram({ pos, code }) }
+  })
 
   // A passage link pasted while this doc is already open only changes the hash.
   useEffect(() => {
@@ -767,15 +746,23 @@ export default function DocEditor({
     <div className="doc" data-outline={outline || undefined}>
       {toolbarHost &&
         createPortal(
-          <Toolbar editor={editor} page={page} onPage={changePage} actions={actions} onCopyLink={copyLink} />,
+          <Toolbar
+            editor={editor}
+            page={page}
+            onPage={changePage}
+            actions={actions}
+            onCopyLink={copyLink}
+            onImages={(files) => void addImages(files)}
+            onDiagram={() => setDiagram({ pos: null, code: '' })}
+          />,
           toolbarHost,
         )}
       <DocOutline editor={editor} open={outline} onToggle={toggleOutline} />
       <div
         className="doc-canvas"
         onContextMenu={(e) => {
-          // Only take over the menu when there is a selection to format.
-          if (editor.state.selection.empty) return
+          // Only take over the menu when there is a selection to format or a table to edit.
+          if (editor.state.selection.empty && !findTable(editor.state.selection)) return
           e.preventDefault()
           setMenu({ x: e.clientX, y: e.clientY })
         }}
@@ -784,6 +771,12 @@ export default function DocEditor({
       </div>
       <AnimatePresence>
         {menu && <ContextMenu key={`${menu.x},${menu.y}`} editor={editor} at={menu} onClose={() => setMenu(null)} onCopyLink={copyLink} />}
+      </AnimatePresence>
+      <TableBar editor={editor} />
+      <AnimatePresence>
+        {diagram && (
+          <DiagramDialog key="diagram" initial={diagram.code} editing={diagram.pos !== null} onClose={() => setDiagram(null)} onSave={saveDiagram} />
+        )}
       </AnimatePresence>
       <Float>
         <AnimatePresence>
@@ -797,7 +790,7 @@ export default function DocEditor({
               exit={{ opacity: 0, y: 16, scale: 0.97, transition: { duration: 0.15 } }}
             >
               <span className="toast-icon">
-                <LinkSimple size={20} weight="bold" />
+                {notice.tone === 'busy' ? <span className="spinner" /> : notice.icon ? <notice.icon size={20} weight="bold" /> : <LinkSimple size={20} weight="bold" />}
               </span>
               <div className="toast-body">
                 <p className="toast-text">{notice.text}</p>

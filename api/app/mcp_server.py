@@ -29,9 +29,14 @@ mcp = MCPServer(
     instructions=(
         "Chia manages three kinds of documents: 'doc' (rich text), 'sheet' (columns + rows; "
         "strings starting with '=' are formulas) and 'slides' (list of {title, body}). Create docs "
-        "from markdown. Reading a doc returns {html, page}; to edit one, send content "
-        "{markdown} or {html} (allowed tags: p, h1-h3, ul/ol/li, strong, em, u, s, br, "
-        "<span style='font-size:14pt'>, style='text-align:center' on blocks). When the user has "
+        "from markdown: GitHub-style pipe tables become real tables, and ```mermaid fenced blocks "
+        "become diagrams (flowchart, sequenceDiagram, mindmap, timeline, pie, gantt, erDiagram, "
+        "classDiagram, stateDiagram-v2, journey, quadrantChart) drawn in Chia's own style, so "
+        "don't add colours or themes to them. Reading a doc returns {html, page}; to edit one, send "
+        "content {markdown} or {html} (allowed tags: p, h1-h3, ul/ol/li, strong, em, u, s, br, "
+        "<span style='font-size:14pt'>, style='text-align:center' on blocks, table/tr/th/td, "
+        "<img src='/api/assets/...'> for images already in the doc, and "
+        "<figure data-type='diagram' data-code='mermaid source'>). When the user has "
         "linked Google, documents are backed up to Drive and results include drive_url. Prefer "
         "creating new documents over overwriting existing ones unless asked to edit."
     ),
@@ -92,7 +97,8 @@ def get_document(document_id: str) -> DocumentFull:
 
 @mcp.tool()
 def create_doc(title: str, markdown: str) -> DocumentInfo:
-    """Create a text document from markdown (headings, lists, bold, italic)."""
+    """Create a text document from markdown: headings, lists, bold, italic, pipe tables and
+    ```mermaid diagrams (rendered in Chia's style)."""
     return _create(DocKind.doc, title, {"markdown": markdown})
 
 
