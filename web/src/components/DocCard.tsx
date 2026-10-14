@@ -1,7 +1,8 @@
 import { CloudCheck, Robot, Trash } from '@phosphor-icons/react'
 import { motion } from 'motion/react'
+import type { Ref } from 'react'
 import { Link } from 'react-router'
-import { timeAgo, type DocSummary } from '../lib/api'
+import { parseDate, timeAgo, type DocSummary } from '../lib/api'
 import { KINDS, softSpring } from '../lib/kinds'
 
 function Thumbnail({ kind }: { kind: DocSummary['kind'] }) {
@@ -29,10 +30,21 @@ function Thumbnail({ kind }: { kind: DocSummary['kind'] }) {
   )
 }
 
-export default function DocCard({ doc, index, onDelete }: { doc: DocSummary; index: number; onDelete: (doc: DocSummary) => void }) {
+interface ItemProps {
+  doc: DocSummary
+  index: number
+  onDelete: (doc: DocSummary) => void
+  /** AnimatePresence's popLayout needs the element to lift leaving items out of the layout. */
+  ref?: Ref<HTMLLIElement>
+}
+
+const FULL_DATE = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+export default function DocCard({ doc, index, onDelete, ref }: ItemProps) {
   const { icon: Icon, label } = KINDS[doc.kind]
   return (
     <motion.li
+      ref={ref}
       layout
       initial={{ opacity: 0, y: 14, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -74,6 +86,49 @@ export default function DocCard({ doc, index, onDelete }: { doc: DocSummary; ind
           <Trash size={16} />
         </button>
       </motion.div>
+    </motion.li>
+  )
+}
+
+/** One row of the library's list view: name, type and when it was last edited. */
+export function DocRow({ doc, index, onDelete, ref }: ItemProps) {
+  const { icon: Icon, label } = KINDS[doc.kind]
+  const edited = parseDate(doc.updated_at)
+  return (
+    <motion.li
+      ref={ref}
+      layout
+      className="doc-row-item"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.98 }}
+      transition={{ ...softSpring, delay: Math.min(index, 16) * 0.02 }}
+    >
+      <Link to={`/d/${doc.id}`} className="doc-row" data-kind={doc.kind}>
+        <span className="row-name">
+          <span className="row-icon">
+            <Icon size={18} weight="fill" />
+          </span>
+          <span className="row-title">{doc.title}</span>
+          {doc.source === 'mcp' && (
+            <span className="badge" title="Created by an AI agent over MCP">
+              <Robot size={12} weight="fill" /> AI
+            </span>
+          )}
+          {doc.drive_url && (
+            <span className="card-drive" title="Backed up to Google Drive">
+              <CloudCheck size={14} weight="fill" />
+            </span>
+          )}
+        </span>
+        <span className="row-kind">{label}</span>
+        <time className="row-time" dateTime={edited.toISOString()} title={FULL_DATE.format(edited)}>
+          {timeAgo(doc.updated_at)}
+        </time>
+      </Link>
+      <button className="row-delete icon-btn danger" aria-label={`Delete ${doc.title}`} title="Delete" onClick={() => onDelete(doc)}>
+        <Trash size={16} />
+      </button>
     </motion.li>
   )
 }

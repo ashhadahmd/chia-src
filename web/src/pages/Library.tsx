@@ -1,13 +1,14 @@
-import { CheckCircle, CircleNotch, Leaf, MagnifyingGlass, UploadSimple, WarningCircle, X } from '@phosphor-icons/react'
+import { CheckCircle, CircleNotch, Leaf, ListBullets, MagnifyingGlass, SquaresFour, UploadSimple, WarningCircle, X } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { Link, useNavigate } from 'react-router'
-import DocCard from '../components/DocCard'
+import DocCard, { DocRow } from '../components/DocCard'
+import { Select } from '../components/EditorUI'
 import ImportMenu from '../components/ImportMenu'
 import NewMenu from '../components/NewMenu'
 import Sidebar from '../components/Sidebar'
 import { useFilter, type Filter } from '../lib/filter'
-import { api, type DocKind, type DocSummary, type GoogleStatus, type ImportResult } from '../lib/api'
+import { api, parseDate, type DocKind, type DocSummary, type GoogleStatus, type ImportResult } from '../lib/api'
 import { pickFromDrive } from '../lib/picker'
 import { useAuth } from '../lib/useAuth'
 import { KINDS, softSpring } from '../lib/kinds'
@@ -23,6 +24,51 @@ const EMPTY_COPY: Record<Filter, string> = {
   sheet: 'No sheets yet.',
   slides: 'No decks yet.',
   mcp: 'No AI-made documents yet.',
+}
+
+type View = 'grid' | 'list'
+type Sort = 'modified' | 'name'
+const VIEW_KEY = 'chia.library.view'
+const SORT_KEY = 'chia.library.sort'
+
+const SORTS: { value: Sort; label: string; hint: string }[] = [
+  { value: 'modified', label: 'Last modified', hint: 'Most recently edited first' },
+  { value: 'name', label: 'Name', hint: 'Alphabetical, A to Z' },
+]
+const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+function stored<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const value = localStorage.getItem(key) as T | null
+    return value && allowed.includes(value) ? value : fallback
+  } catch {
+    return fallback // storage unavailable
+  }
+}
+
+function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function ViewToggle({ view, onChange }: { view: View; onChange: (v: View) => void }) {
+  const options = [
+    { value: 'grid' as const, icon: SquaresFour, label: 'Grid view' },
+    { value: 'list' as const, icon: ListBullets, label: 'List view' },
+  ]
+  return (
+    <div className="view-toggle" role="radiogroup" aria-label="Layout">
+      {options.map(({ value, icon: Icon, label }) => (
+        <button key={value} type="button" role="radio" aria-checked={view === value} aria-label={label} title={label} onClick={() => onChange(value)}>
+          {view === value && <motion.span layoutId="view-toggle-active" className="view-toggle-active" transition={softSpring} />}
+          <Icon size={18} weight={view === value ? 'fill' : 'regular'} />
+        </button>
+      ))}
+    </div>
+  )
 }
 
 interface ImportTask {
@@ -80,6 +126,8 @@ export default function Library() {
   const [google, setGoogle] = useState<GoogleStatus | null>(null)
   const [task, setTask] = useState<ImportTask | null>(null)
   const [dragging, setDragging] = useState(false)
+  const [view, setView] = useState<View>(() => stored(VIEW_KEY, ['grid', 'list'], 'grid'))
+  const [sort, setSort] = useState<Sort>(() => stored(SORT_KEY, ['modified', 'name'], 'modified'))
   const dragDepth = useRef(0)
   const dismiss = useRef<number | undefined>(undefined)
 
@@ -184,12 +232,15 @@ export default function Library() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return (docs ?? []).filter(
+    const shown = (docs ?? []).filter(
       (d) =>
         (filter === 'all' || (filter === 'mcp' ? d.source === 'mcp' : d.kind === filter)) &&
         (!q || d.title.toLowerCase().includes(q)),
     )
-  }, [docs, filter, query])
+    return sort === 'name'
+      ? shown.sort((a, b) => byName.compare(a.title.trim(), b.title.trim()))
+      : shown.sort((a, b) => parseDate(b.updated_at).getTime() - parseDate(a.updated_at).getTime())
+  }, [docs, filter, query, sort])
 
   async function remove(doc: DocSummary) {
     if (!window.confirm(`Delete “${doc.title}”? This cannot be undone.`)) return
@@ -236,6 +287,30 @@ export default function Library() {
           </div>
         </header>
 
+        <div className="library-bar">
+          <span className="library-count">
+            {docs === null ? '\u00a0' : `${visible.length} ${visible.length === 1 ? 'item' : 'items'}`}
+          </span>
+          <Select
+            className="library-select"
+            label="Sort by"
+            tip={{ label: 'Sort', hint: 'Order by last edit or by name' }}
+            value={sort}
+            choices={SORTS}
+            onChange={(v) => {
+              setSort(v)
+              remember(SORT_KEY, v)
+            }}
+          />
+          <ViewToggle
+            view={view}
+            onChange={(v) => {
+              setView(v)
+              remember(VIEW_KEY, v)
+            }}
+          />
+        </div>
+
         {docs === null ? (
           <ul className="grid">
             {Array.from({ length: 6 }, (_, i) => <li key={i} className="card skeleton" />)}
@@ -253,11 +328,36 @@ export default function Library() {
             </p>
           </motion.div>
         ) : (
-          <ul className="grid">
-            <AnimatePresence mode="popLayout">
-              {visible.map((doc, i) => <DocCard key={doc.id} doc={doc} index={i} onDelete={remove} />)}
-            </AnimatePresence>
-          </ul>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={view}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6, transition: { duration: 0.12 } }}
+              transition={softSpring}
+            >
+              {view === 'grid' ? (
+                <ul className="grid">
+                  <AnimatePresence mode="popLayout">
+                    {visible.map((doc, i) => <DocCard key={doc.id} doc={doc} index={i} onDelete={remove} />)}
+                  </AnimatePresence>
+                </ul>
+              ) : (
+                <div className="doc-table">
+                  <div className="doc-table-head" aria-hidden="true">
+                    <span>Name</span>
+                    <span>Type</span>
+                    <span>Last modified</span>
+                  </div>
+                  <ul className="doc-list">
+                    <AnimatePresence mode="popLayout">
+                      {visible.map((doc, i) => <DocRow key={doc.id} doc={doc} index={i} onDelete={remove} />)}
+                    </AnimatePresence>
+                  </ul>
+                </div>
+              )}
+            </motion.div>
+          </AnimatePresence>
         )}
         <AnimatePresence>
           {dragging && (
