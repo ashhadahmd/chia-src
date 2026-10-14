@@ -1,0 +1,23 @@
+[project]
+name = "chia-api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cryptography>=50.0.2",
+    "fastapi[standard]>=0.142.2",
+    "google-api-python-client>=2.201.0",
+    "google-auth>=2.59.1",
+    "google-auth-oauthlib>=1.5.0",
+    "markdown-it-py>=4.2.0",
+    "mcp[cli]>=2.2.0",
+    "openpyxl>=3.1.5",
+    "pwdlib[argon2]>=0.3.1",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.15.1",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+    "sqlmodel>=0.0.47",
+    "weasyprint>=70.0",
+]

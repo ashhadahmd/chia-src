@@ -1,0 +1,240 @@
+/* ───────────── Oat & Earth tokens ───────────── */
+:root {
+  color-scheme: light;
+  --canvas: #f7f4ed;
+  --surface: #fcfbf9;
+  --page: #fdfcf9;
+  --tc-stone: #6f6e66;
+  --tc-sage: #5a6b47;
+  --tc-eucalyptus: #3f6e66;
+  --tc-terracotta: #b05a47;
+  --tc-ochre: #9a7424;
+  --tc-clay: #8c5a3c;
+  --tc-plum: #7a4f72;
+  --tc-slate: #4a5a6e;
+  --surface-sunk: #efebe1;
+  --surface-hover: #f1ede4;
+  --ink: #2c2c29;
+  --ink-soft: #55554f;
+  --muted: #8a8a83;
+  --line: rgba(44, 44, 41, 0.1);
+  --line-strong: rgba(44, 44, 41, 0.18);
+
+  --sage: #5a6b47;
+  --sage-bright: #6b7f5c;
+  --sage-soft: rgba(107, 127, 92, 0.14);
+  --eucalyptus: #4f7a74;
+  --eucalyptus-soft: rgba(79, 122, 116, 0.14);
+  --terracotta: #b56a5a;
+  --terracotta-soft: rgba(193, 119, 103, 0.16);
+  --on-accent: #faf8f5;
+
+  --shadow-soft: 0 1px 2px rgba(44, 44, 41, 0.04), 0 4px 12px rgba(44, 44, 41, 0.04);
+  --shadow-ambient: 0 12px 32px rgba(44, 44, 41, 0.08);
+  --shadow-lift: 0 20px 48px rgba(44, 44, 41, 0.12);
+  --focus-ring: 0 0 0 3px rgba(107, 127, 92, 0.32);
+  --grain-fine: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' seed='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.4 0 0 0 0 0.32 0 0 0 0 0.22 1.2 0 0 0 -0.52'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29'/%3E%3C/svg%3E");
+  --grain-sand: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='320'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='2' seed='9' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.32 0 0 0 0 0.24 0 0 0 0 0.15 12 0 0 0 -7.6'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29'/%3E%3C/svg%3E");
+  --grain-opacity: 0.16;
+  --grain-blend: multiply;
+
+  --r-xs: 10px;
+  --r-sm: 14px;
+  --r-md: 18px;
+  --r-lg: 24px;
+
+  --font-display: 'Fraunces Variable', 'Iowan Old Style', Georgia, serif;
+  --font-ui: 'Nunito Variable', ui-rounded, system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --canvas: #1a1916;
+    --surface: #23221e;
+    --page: #22211d;
+    --tc-stone: #a9a69b;
+    --tc-sage: #a3b68f;
+    --tc-eucalyptus: #8bb5ac;
+    --tc-terracotta: #dc9a8a;
+    --tc-ochre: #d9b562;
+    --tc-clay: #c99a7c;
+    --tc-plum: #c79bc0;
+    --tc-slate: #9db0c6;
+    --surface-sunk: #2b2a25;
+    --surface-hover: #2a2924;
+    --ink: #ece7dc;
+    --ink-soft: #c4bfb3;
+    --muted: #8f8c82;
+    --line: rgba(236, 231, 220, 0.09);
+    --line-strong: rgba(236, 231, 220, 0.16);
+    --sage: #a3b68f;
+    --sage-bright: #b3c49f;
+    --sage-soft: rgba(163, 182, 143, 0.14);
+    --eucalyptus: #8bb5ac;
+    --eucalyptus-soft: rgba(139, 181, 172, 0.14);
+    --terracotta: #dc9a8a;
+    --terracotta-soft: rgba(220, 154, 138, 0.15);
+    --on-accent: #1a1916;
+    --shadow-soft: 0 1px 2px rgba(8, 7, 5, 0.3), 0 4px 12px rgba(8, 7, 5, 0.2);
+    --shadow-ambient: 0 14px 36px rgba(8, 7, 5, 0.42);
+    --shadow-lift: 0 22px 52px rgba(8, 7, 5, 0.55);
+    --focus-ring: 0 0 0 3px rgba(163, 182, 143, 0.3);
+    --grain-fine: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' seed='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.92 0 0 0 0 0.86 0 0 0 0 0.74 1.2 0 0 0 -0.55'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29'/%3E%3C/svg%3E");
+    --grain-sand: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='320'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='2' seed='9' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.96 0 0 0 0 0.9 0 0 0 0 0.8 12 0 0 0 -7.7'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29'/%3E%3C/svg%3E");
+    --grain-opacity: 0.11;
+    --grain-blend: screen;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --canvas: #1a1916;
+  --surface: #23221e;
+  --page: #22211d;
+  --tc-stone: #a9a69b;
+  --tc-sage: #a3b68f;
+  --tc-eucalyptus: #8bb5ac;
+  --tc-terracotta: #dc9a8a;
+  --tc-ochre: #d9b562;
+  --tc-clay: #c99a7c;
+  --tc-plum: #c79bc0;
+  --tc-slate: #9db0c6;
+  --surface-sunk: #2b2a25;
+  --surface-hover: #2a2924;
+  --ink: #ece7dc;
+  --ink-soft: #c4bfb3;
+  --muted: #8f8c82;
+  --line: rgba(236, 231, 220, 0.09);
+  --line-strong: rgba(236, 231, 220, 0.16);
+  --sage: #a3b68f;
+  --sage-bright: #b3c49f;
+  --sage-soft: rgba(163, 182, 143, 0.14);
+  --eucalyptus: #8bb5ac;
+  --eucalyptus-soft: rgba(139, 181, 172, 0.14);
+  --terracotta: #dc9a8a;
+  --terracotta-soft: rgba(220, 154, 138, 0.15);
+  --on-accent: #1a1916;
+  --shadow-soft: 0 1px 2px rgba(8, 7, 5, 0.3), 0 4px 12px rgba(8, 7, 5, 0.2);
+  --shadow-ambient: 0 14px 36px rgba(8, 7, 5, 0.42);
+  --shadow-lift: 0 22px 52px rgba(8, 7, 5, 0.55);
+  --focus-ring: 0 0 0 3px rgba(163, 182, 143, 0.3);
+  --grain-fine: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' seed='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.92 0 0 0 0 0.86 0 0 0 0 0.74 1.2 0 0 0 -0.55'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29'/%3E%3C/svg%3E");
+  --grain-sand: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='320'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='2' seed='9' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.96 0 0 0 0 0.9 0 0 0 0 0.8 12 0 0 0 -7.7'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29'/%3E%3C/svg%3E");
+  --grain-opacity: 0.11;
+  --grain-blend: screen;
+}
+
+/* Apple-style continuous corners where the browser supports them. Squircles read
+   tighter than circular arcs at the same radius, so the radii are bumped. */
+@supports (corner-shape: squircle) {
+  :root {
+    --r-xs: 14px;
+    --r-sm: 20px;
+    --r-md: 26px;
+    --r-lg: 34px;
+  }
+  *,
+  *::before,
+  *::after {
+    corner-shape: squircle;
+  }
+}
+
+/* ───────────── Base ───────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Sand grain on the canvas only: it sits behind all content (z-index -1), so opaque
+   surfaces like the document page, cards and menus stay clean. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: var(--grain-blend);
+  background-image: var(--grain-sand), var(--grain-fine);
+}
+
+/* Theme changes cross-fade slowly instead of snapping. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.7s;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+.theme-fade,
+.theme-fade *,
+.theme-fade *::before,
+.theme-fade *::after {
+  transition:
+    background-color 0.7s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.7s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.7s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.7s cubic-bezier(0.4, 0, 0.2, 1),
+    fill 0.7s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-variation-settings: 'SOFT' 100;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  margin: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+::selection {
+  background: var(--sage-soft);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
