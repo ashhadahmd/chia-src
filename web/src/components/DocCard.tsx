@@ -1,4 +1,4 @@
-import { CloudCheck, Robot, Trash } from '@phosphor-icons/react'
+import { CloudCheck, Robot, Trash, UsersThree } from '@phosphor-icons/react'
 import { motion } from 'motion/react'
 import type { Ref } from 'react'
 import { Link } from 'react-router'
@@ -33,6 +33,8 @@ function Thumbnail({ kind }: { kind: DocSummary['kind'] }) {
 interface ItemProps {
   doc: DocSummary
   index: number
+  /** Someone shared it with you from outside this workspace: badged, and not yours to delete. */
+  shared?: boolean
   onDelete: (doc: DocSummary) => void
   /** AnimatePresence's popLayout needs the element to lift leaving items out of the layout. */
   ref?: Ref<HTMLLIElement>
@@ -40,7 +42,7 @@ interface ItemProps {
 
 const FULL_DATE = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
-export default function DocCard({ doc, index, onDelete, ref }: ItemProps) {
+export default function DocCard({ doc, index, shared, onDelete, ref }: ItemProps) {
   const { icon: Icon, label } = KINDS[doc.kind]
   return (
     <motion.li
@@ -60,6 +62,7 @@ export default function DocCard({ doc, index, onDelete, ref }: ItemProps) {
             <span className="card-kind">
               <Icon size={16} weight="fill" />
               {label}
+              {shared && <SharedBadge />}
               {agentOf(doc) && (
                 <span className="badge" title={agentTitle(doc)}>
                   <Robot size={12} weight="fill" /> {agentOf(doc)}
@@ -77,21 +80,18 @@ export default function DocCard({ doc, index, onDelete, ref }: ItemProps) {
             </span>
           </div>
         </Link>
-        <button
-          className="card-delete"
-          aria-label={`Delete ${doc.title}`}
-          title="Delete"
-          onClick={() => onDelete(doc)}
-        >
-          <Trash size={16} />
-        </button>
+        {!shared && (
+          <button className="card-delete" aria-label={`Delete ${doc.title}`} title="Delete" onClick={() => onDelete(doc)}>
+            <Trash size={16} />
+          </button>
+        )}
       </motion.div>
     </motion.li>
   )
 }
 
 /** One row of the library's list view: name, type and when it was last edited. */
-export function DocRow({ doc, index, onDelete, ref }: ItemProps) {
+export function DocRow({ doc, index, shared, onDelete, ref }: ItemProps) {
   const { icon: Icon, label } = KINDS[doc.kind]
   const edited = parseDate(doc.updated_at)
   return (
@@ -110,6 +110,7 @@ export function DocRow({ doc, index, onDelete, ref }: ItemProps) {
             <Icon size={18} weight="fill" />
           </span>
           <span className="row-title">{doc.title}</span>
+          {shared && <SharedBadge />}
           {agentOf(doc) && (
             <span className="badge" title={agentTitle(doc)}>
               <Robot size={12} weight="fill" /> {agentOf(doc)}
@@ -126,10 +127,20 @@ export function DocRow({ doc, index, onDelete, ref }: ItemProps) {
           {timeAgo(doc.updated_at)}
         </time>
       </Link>
-      <button className="row-delete icon-btn danger" aria-label={`Delete ${doc.title}`} title="Delete" onClick={() => onDelete(doc)}>
-        <Trash size={16} />
-      </button>
+      {!shared && (
+        <button className="row-delete icon-btn danger" aria-label={`Delete ${doc.title}`} title="Delete" onClick={() => onDelete(doc)}>
+          <Trash size={16} />
+        </button>
+      )}
     </motion.li>
+  )
+}
+
+function SharedBadge() {
+  return (
+    <span className="badge badge-shared" title="Shared with you from another workspace">
+      <UsersThree size={12} weight="fill" /> Shared
+    </span>
   )
 }
 

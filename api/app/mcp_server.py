@@ -15,6 +15,7 @@ from typing import Annotated, Any, Literal
 import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
@@ -44,7 +45,9 @@ mcp = MCPServer(
     title="Chia",
     instructions=(
         "Chia is the user's own docs, sheets and slides app. Three kinds of documents: 'doc' "
-        "(rich text), 'sheet' (columns + rows; strings starting with '=' are formulas) and "
+        "(rich text), 'sheet' (columns + rows; strings starting with '=' are formulas, shown "
+        "evaluated in Chia; row_ids keep rows matched, so send them back unchanged with a whole "
+        "sheet) and "
         "'slides' (list of {id, title, body}). Write docs in markdown: GitHub-style pipe tables "
         "become real tables, and ```mermaid fenced blocks become diagrams (flowchart, "
         "sequenceDiagram, mindmap, timeline, pie, gantt, erDiagram, classDiagram, "
@@ -367,7 +370,7 @@ def update_sheet_cells(
                 rows.append([None] * len(columns))
             rows[edit.row - 1][c] = edit.value
         rows += [list(r) for r in append_rows or []]
-        return {"columns": columns, "rows": rows}
+        return {"columns": columns, "rows": rows, "row_ids": content["row_ids"]}  # new rows get ids on save
 
     return _update(document_id, None, edited)
 
@@ -471,4 +474,11 @@ class MCPAuth:
             current_actor.reset(token)
 
 
-mcp_app = MCPAuth(mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True))
+_LOCAL_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+_security = TransportSecuritySettings(
+    allowed_hosts=_LOCAL_HOSTS + get_settings().mcp_allowed_hosts,
+    allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*", *get_settings().cors_origins],
+)
+mcp_app = MCPAuth(
+    mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True, transport_security=_security)
+)

@@ -45,10 +45,15 @@ def migrate() -> None:
 def init_db() -> None:
     """Startup: migrate when AUTO_MIGRATE is on, then make sure the root account exists.
     Safe when several instances start at once."""
-    from app.workspaces import personal_workspace
-
     if settings.auto_migrate:
         migrate()
+    ensure_root()
+
+
+def ensure_root() -> None:
+    """Make the root account (and its personal workspace) if it doesn't exist yet."""
+    from app.workspaces import personal_workspace
+
     with Session(engine) as session:
         root = session.exec(
             select(User).where(or_(User.email == settings.root_email, User.username == settings.root_username))

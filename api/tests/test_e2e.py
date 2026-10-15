@@ -3,12 +3,20 @@
 Phase 1: workspaces, roles, sharing, scoped agent keys, blob storage, SQL search.
 Phase 2: three-way merges of concurrent human + agent edits (no 409), surgical MCP tools,
 realtime events, conditional (ETag) reconciles.
+Phase 3: sheet row ids, offloaded large bodies, public links, lazy heavy imports, the Lambda
+entry points, the AppSync Events sink and authorizer, and the browser's formula evaluator.
 """
 
+import gzip
 import io
 import json
+import os
 import queue
+import shutil
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,8 +24,11 @@ from fastapi import WebSocketDisconnect
 from PIL import Image
 from sqlmodel import Session, select
 
+from app import export, realtime
+from app.config import get_settings
 from app.db import engine
 from app.models import ApiKey, Asset, AssetReference, Document, DocumentSnapshot, User
+from app.routes.realtime import authorize_appsync
 from app.security import create_access_token, hash_password
 from app.storage import get_storage
 
@@ -404,3 +415,271 @@ def test_events_are_json_serialisable_summaries(client, auth, agent_key):
         event = ws.until("doc.created")
         assert "content" not in event["doc"] and event["doc"]["kind"] == "sheet"
         json.dumps(event)
+
+
+# ───────────── Phase 3: row ids, offloading, public links, serverless ─────────────
+
+
+def test_sheet_rows_merge_by_id_across_inserts_and_deletes(client, auth):
+    """Both sides insert and delete rows in the middle; edits follow their rows, not positions."""
+    sheet = new_doc(client, auth["root"], "sheet", {"columns": ["Item", "Qty"], "rows": [["a", 1], ["b", 2], ["c", 3], ["d", 4], ["e", 5]]})
+    ids, rows = sheet["content"]["row_ids"], sheet["content"]["rows"]
+    assert len(set(ids)) == 5
+    # Theirs (a teammate): insert x after a, delete c, set d to 40.
+    theirs_rows = [rows[0], ["x", 9], rows[1], ["d", 40], rows[4]]
+    theirs_ids = [ids[0], "newx0001", ids[1], ids[3], ids[4]]
+    r = client.patch(
+        f"/api/documents/{sheet['id']}",
+        headers=auth["root"],
+        json={"content": {"columns": ["Item", "Qty"], "rows": theirs_rows, "row_ids": theirs_ids}, "base_revision": sheet["revision"]},
+    )
+    assert r.status_code == 200 and not r.json()["merged"]
+    # Ours (a tab still on the old revision): insert y at the top, delete e, set b to 20.
+    ours_rows = [["y", 7], rows[0], ["b", 20], rows[2], rows[3]]
+    ours_ids = ["newy0001", ids[0], ids[1], ids[2], ids[3]]
+    saved = client.patch(
+        f"/api/documents/{sheet['id']}",
+        headers=auth["root"],
+        json={"content": {"columns": ["Item", "Qty"], "rows": ours_rows, "row_ids": ours_ids}, "base_revision": sheet["revision"]},
+    ).json()
+    assert saved["merged"] and saved["conflicts"] == []
+    assert saved["content"]["rows"] == [["y", 7], ["a", 1], ["x", 9], ["b", 20], ["d", 40]]
+    assert saved["content"]["row_ids"] == ["newy0001", ids[0], "newx0001", ids[1], ids[3]]
+
+
+def test_sheet_row_ids_are_filled_in_and_kept(client, auth, agent_key):
+    """Sheets without row ids get them; an agent's cell edits and appended rows keep them."""
+    made = tool(client, agent_key, "create_sheet", {"title": "Ids", "columns": ["n"], "rows": [[1], [2]]})
+    first = client.get(f"/api/documents/{made['id']}", headers=auth["root"]).json()["content"]["row_ids"]
+    tool(client, agent_key, "update_sheet_cells", {"document_id": made["id"], "cells": [{"row": 1, "column": "n", "value": "=A2*2"}], "append_rows": [[3]]})
+    content = client.get(f"/api/documents/{made['id']}", headers=auth["root"]).json()["content"]
+    assert content["rows"] == [["=A2*2"], [2], [3]]  # formulas stay as written
+    assert content["row_ids"][:2] == first and len(set(content["row_ids"])) == 3
+    with Session(engine) as s:  # a sheet stored before row ids existed reads with positional ones
+        doc = s.get(Document, made["id"])
+        doc.content = {"columns": ["n"], "rows": [[1], [2]]}
+        s.add(doc)
+        s.commit()
+    assert client.get(f"/api/documents/{made['id']}", headers=auth["root"]).json()["content"]["row_ids"] == ["r0", "r1"]
+
+
+@pytest.fixture
+def small_inline_limit(monkeypatch):
+    monkeypatch.setattr(get_settings(), "inline_content_max_bytes", 400)
+
+
+def _blob(key: str) -> dict:
+    data = get_storage().get(key)
+    assert data is not None, f"{key} missing from storage"
+    return json.loads(gzip.decompress(data))
+
+
+def test_large_bodies_are_offloaded_and_read_transparently(client, auth, agent_key, small_inline_limit):
+    big = "".join(f"<p>Paragraph {i} about offloaded zebrafish.</p>" for i in range(40))
+    doc = new_doc(client, auth["root"], "doc", {"html": big, "page": "a4"})
+    small = new_doc(client, auth["root"], "doc", {"html": "<p>tiny</p>", "page": "a4"})
+    with Session(engine) as s:
+        row = s.get(Document, doc["id"])
+        assert row.content == {"_offloaded": True} and row.s3_content_key.startswith(f"docs/{doc['id']}/rev-0-")
+        assert _blob(row.s3_content_key)["html"] == big
+        snap = s.get(DocumentSnapshot, (doc["id"], 0))
+        assert snap.content_z == b"" and snap.s3_content_key == row.s3_content_key
+        assert s.get(Document, small["id"]).s3_content_key is None  # small bodies stay inline
+    # Every reader sees the full body: REST, MCP, search, export.
+    assert client.get(f"/api/documents/{doc['id']}", headers=auth["root"]).json()["content"]["html"] == big
+    assert "Paragraph 39" in tool(client, agent_key, "get_document", {"document_id": doc["id"]})["content"]["markdown"]
+    assert any(h["id"] == doc["id"] for h in tool(client, agent_key, "search_documents", {"query": "zebrafish"}))
+    assert client.get(f"/api/documents/{doc['id']}/export/docx", headers=auth["root"]).status_code == 200
+    # Merges hydrate both the stored version and the base snapshot.
+    tool(client, agent_key, "patch_doc", {"document_id": doc["id"], "markdown": "Agent line."})
+    saved = client.patch(
+        f"/api/documents/{doc['id']}", headers=auth["root"], json={"content": {"html": "<p>Mine first.</p>" + big, "page": "a4"}, "base_revision": 0}
+    ).json()
+    assert saved["merged"] and saved["content"]["html"].startswith("<p>Mine first.</p>") and "Agent line." in saved["content"]["html"]
+
+
+def test_offloaded_blobs_are_pruned_with_snapshots_and_deleted_with_the_doc(client, auth, small_inline_limit):
+    body = lambda n: {"html": "".join(f"<p>Rev {n} line {i}</p>" for i in range(40)), "page": "a4"}
+    doc = new_doc(client, auth["root"], "doc", body(0))
+    with Session(engine) as s:
+        keys = [s.get(Document, doc["id"]).s3_content_key]
+    client.patch(f"/api/documents/{doc['id']}", headers=auth["root"], json={"title": "Renamed only"})
+    with Session(engine) as s:
+        assert s.get(Document, doc["id"]).s3_content_key == keys[0]  # a rename reuses the blob
+    for n in range(1, 13):
+        client.patch(f"/api/documents/{doc['id']}", headers=auth["root"], json={"content": body(n)})
+        with Session(engine) as s:
+            keys.append(s.get(Document, doc["id"]).s3_content_key)
+    with Session(engine) as s:
+        live = set(s.exec(select(DocumentSnapshot.s3_content_key).where(DocumentSnapshot.document_id == doc["id"])).all())
+    assert len(live) == 10 and keys[-1] in live
+    for key in keys:
+        assert (get_storage().get(key) is not None) == (key in live), key
+    assert client.get(f"/api/documents/{doc['id']}", headers=auth["root"]).json()["content"] == body(12)
+    assert client.delete(f"/api/documents/{doc['id']}", headers=auth["root"]).status_code == 204
+    assert all(get_storage().get(k) is None for k in keys)
+
+
+def test_public_link_create_read_revoke(client, auth):
+    sheet = new_doc(client, auth["root"], "sheet", {"columns": ["n", "double"], "rows": [[2, "=A1*2"]]}, title="Public sums")
+    assert client.post(f"/api/documents/{sheet['id']}/shares", headers=auth["bob"], json={"principal_type": "public_link"}).status_code == 404
+    link = client.post(f"/api/documents/{sheet['id']}/shares", headers=auth["root"], json={"principal_type": "public_link", "role": "editor"}).json()
+    assert link["principal_type"] == "public_link" and link["role"] == "viewer" and len(link["principal_id"]) >= 32
+    again = client.post(f"/api/documents/{sheet['id']}/shares", headers=auth["root"], json={"principal_type": "public_link"}).json()
+    assert again["principal_id"] == link["principal_id"]  # one link per document
+    # Anyone with the token reads it, with no sign-in; formulas come as written.
+    r = client.get(f"/api/public/{link['principal_id']}")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    body = r.json()
+    assert body["title"] == "Public sums" and body["kind"] == "sheet" and body["content"]["rows"] == [[2, "=A1*2"]]
+    assert set(body) == {"kind", "title", "revision", "updated_at", "content"}  # no ids or owner
+    assert client.get(f"/api/public/{link['principal_id']}", headers={"If-None-Match": r.headers["etag"]}).status_code == 304
+    # The link reads; it never signs anyone in or lets them write.
+    assert client.get(f"/api/documents/{sheet['id']}").status_code == 401
+    assert client.patch(f"/api/documents/{sheet['id']}", json={"title": "x"}).status_code == 401
+    assert client.get("/api/public/not-a-real-token").status_code == 404
+    shares = client.get(f"/api/documents/{sheet['id']}/shares", headers=auth["root"]).json()
+    assert [s["label"] for s in shares] == ["Anyone with the link"]
+    assert client.delete(f"/api/documents/{sheet['id']}/shares/{link['id']}", headers=auth["root"]).status_code == 204
+    assert client.get(f"/api/public/{link['principal_id']}").status_code == 404
+    assert client.get(f"/api/public/{link['principal_id']}", headers={"If-None-Match": r.headers["etag"]}).status_code == 404
+
+
+def test_public_link_dies_with_the_document(client, auth):
+    doc = new_doc(client, auth["root"], "doc", {"html": "<p>bye</p>", "page": "a4"})
+    token = client.post(f"/api/documents/{doc['id']}/shares", headers=auth["root"], json={"principal_type": "public_link"}).json()["principal_id"]
+    assert client.get(f"/api/public/{token}").status_code == 200
+    client.delete(f"/api/documents/{doc['id']}", headers=auth["root"])
+    assert client.get(f"/api/public/{token}").status_code == 404
+
+
+API_DIR = Path(__file__).resolve().parent.parent
+HEAVY = ("weasyprint", "docx", "pptx", "openpyxl")
+
+
+def _python(code: str) -> str:
+    out = subprocess.run([sys.executable, "-c", code], cwd=API_DIR, env=os.environ.copy(), capture_output=True, text=True, timeout=120, check=False)
+    assert out.returncode == 0, out.stderr[-3000:]
+    return out.stdout
+
+
+def test_api_boots_without_heavy_export_libraries():
+    loaded = _python(f"import sys, app.main, app.lambda_handler; print([m for m in {HEAVY!r} if m in sys.modules])")
+    assert loaded.strip() == "[]"
+
+
+def test_pdf_export_answers_501_without_weasyprint(client, auth, monkeypatch):
+    def missing():
+        raise export.PdfUnavailable("Server-side PDF export isn't available here (OSError)")
+
+    monkeypatch.setattr(export, "_weasyprint", missing)
+    doc = new_doc(client, auth["root"], "doc", {"html": "<p>x</p>", "page": "a4"})
+    r = client.get(f"/api/documents/{doc['id']}/export/pdf", headers=auth["root"])
+    assert r.status_code == 501 and "Save as PDF" in r.json()["detail"]
+    assert client.get(f"/api/documents/{doc['id']}/export/docx", headers=auth["root"]).status_code == 200
+
+
+def test_lambda_entry_points(client, auth):
+    """The Mangum handler serves REST and MCP from a fresh process, as a cold Lambda would,
+    behind a non-localhost domain (MCP_ALLOWED_HOSTS)."""
+    token = auth["root"]["Authorization"]
+    code = f"""
+import json
+from app.lambda_handler import api_handler, migrate_handler
+
+def call(method, path, headers, body=None, host="api.chia.example"):
+    event = {{"version": "2.0", "routeKey": "$default", "rawPath": path, "rawQueryString": "",
+        "headers": {{"host": host, **headers}}, "body": json.dumps(body) if body else None, "isBase64Encoded": False,
+        "requestContext": {{"http": {{"method": method, "path": path, "sourceIp": "127.0.0.1", "protocol": "HTTP/1.1"}},
+            "domainName": host, "stage": "$default", "accountId": "1", "apiId": "x", "requestId": "r"}}}}
+    out = api_handler(event, None)
+    return out["statusCode"], out["body"]
+
+mcp = {{"authorization": "Bearer test-bootstrap-key", "accept": "application/json, text/event-stream", "content-type": "application/json"}}
+print(json.dumps([
+    migrate_handler(),
+    call("GET", "/health", {{}}),
+    call("GET", "/api/documents", {{"authorization": {token!r}}})[0],
+    call("POST", "/mcp", mcp, {{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}}),
+    call("POST", "/mcp", mcp, {{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}})[0],
+    call("POST", "/mcp", mcp, {{"jsonrpc": "2.0", "id": 3, "method": "tools/list"}}, host="evil.example")[0],
+]))
+"""
+    env = {**os.environ, "MCP_ALLOWED_HOSTS": '["api.chia.example"]'}
+    out = subprocess.run([sys.executable, "-c", code], cwd=API_DIR, env=env, capture_output=True, text=True, timeout=120, check=False)
+    assert out.returncode == 0, out.stderr[-3000:]
+    migrated, health, docs_status, (mcp_status, mcp_body), second_call, other_host = json.loads(out.stdout.strip().splitlines()[-1])
+    assert migrated == {"status": "migrated"}
+    assert health == [200, '{"status":"ok"}'] and docs_status == 200
+    assert mcp_status == 200 and "update_sheet_cells" in mcp_body and second_call == 200
+    assert other_host == 421  # MCP's DNS-rebinding guard still holds for unknown hosts
+
+
+def test_appsync_sink_publishes_each_channel(monkeypatch):
+    import httpx
+
+    sent: list[httpx.Request] = []
+    transport = httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={"successful": [], "failed": []}))
+    keyed = realtime.AppSyncEventsSink("https://abc.appsync-api.eu-west-1.amazonaws.com", "chia", api_key="da2-test", transport=transport)
+    keyed(["workspace:w1", "doc:d1"], {"type": "doc.updated", "doc_id": "d1"})
+    assert [str(r.url) for r in sent] == ["https://abc.appsync-api.eu-west-1.amazonaws.com/event"] * 2
+    bodies = [json.loads(r.content) for r in sent]
+    assert [b["channel"] for b in bodies] == ["/chia/workspace/w1", "/chia/doc/d1"]
+    assert json.loads(bodies[0]["events"][0]) == {"type": "doc.updated", "doc_id": "d1"}
+    assert sent[0].headers["x-api-key"] == "da2-test"
+    # Without an API key it signs with IAM (SigV4), region taken from the endpoint.
+    for name, value in {"AWS_ACCESS_KEY_ID": "AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY": "secret", "AWS_SESSION_TOKEN": "tok"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    sent.clear()
+    signed = realtime.AppSyncEventsSink("abc.appsync-api.eu-west-1.amazonaws.com", "chia", transport=transport)
+    signed(["doc:d1"], {"type": "doc.updated"})
+    auth_header = sent[0].headers["authorization"]
+    assert auth_header.startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/") and "/eu-west-1/appsync/aws4_request" in auth_header
+    assert sent[0].headers["x-amz-security-token"] == "tok"
+    # A failing sink never breaks a save.
+    broken = realtime.AppSyncEventsSink("https://x", "chia", api_key="k", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    realtime.add_sink(broken)
+    try:
+        realtime.publish(["doc:d1"], {"type": "doc.updated"})
+    finally:
+        realtime._sinks.remove(broken)
+
+
+def test_appsync_authorizer_checks_channel_access(client, auth, ids):
+    ws = client.get("/api/workspaces", headers=auth["root"]).json()[0]["id"]
+    doc = new_doc(client, auth["root"], "doc")
+    token = create_access_token(ids["carol"])
+    root_token = create_access_token(ids["root"])
+
+    def ask(tok: str, operation: str, channel: str = "") -> bool:
+        event = {"authorizationToken": tok, "requestContext": {"operation": operation, "channel": channel, "channelNamespaceName": "chia"}}
+        decision = authorize_appsync(event)
+        assert decision["ttlOverride"] == 0
+        return decision["isAuthorized"]
+
+    assert ask(root_token, "EVENT_CONNECT") and not ask("garbage", "EVENT_CONNECT")
+    assert ask(root_token, "EVENT_SUBSCRIBE", f"/chia/workspace/{ws}")
+    assert ask(root_token, "EVENT_SUBSCRIBE", f"/chia/doc/{doc['id']}")
+    assert not ask(token, "EVENT_SUBSCRIBE", f"/chia/workspace/{ws}")  # carol isn't a member
+    assert not ask(token, "EVENT_SUBSCRIBE", f"/chia/doc/{doc['id']}")
+    assert not ask(root_token, "EVENT_SUBSCRIBE", "/chia/other/x") and not ask(root_token, "EVENT_SUBSCRIBE", f"/elsewhere/doc/{doc['id']}")
+    assert not ask(root_token, "EVENT_PUBLISH", f"/chia/doc/{doc['id']}")  # only the API publishes
+
+
+def test_realtime_config_defaults_to_websocket(client, auth):
+    cfg = client.get("/api/realtime/config", headers=auth["root"]).json()
+    ws = client.get("/api/workspaces", headers=auth["root"]).json()[0]["id"]
+    assert cfg["backend"] == "websocket" and cfg["personal_workspace_id"] == ws
+    assert client.get("/api/realtime/config").status_code == 401
+
+
+WEB_DIR = API_DIR.parent / "web"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node.js")
+def test_browser_formula_evaluator():
+    """The sheet formula engine runs in the browser; its unit tests run under Node's test runner."""
+    out = subprocess.run(["node", "--test", "--test-reporter=tap", "src/lib/formulas.test.ts"], cwd=WEB_DIR, capture_output=True, text=True, timeout=120, check=False)
+    assert out.returncode == 0, out.stdout[-4000:] + out.stderr[-2000:]
+    assert "# fail 0" in out.stdout

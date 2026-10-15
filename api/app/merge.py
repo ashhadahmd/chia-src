@@ -7,8 +7,10 @@ part, nothing is dropped:
 
 - doc: blocks (paragraphs, headings, lists, tables, pictures) are diffed with difflib;
   a block both sides rewrote keeps both versions, ours first.
-- sheet: cell by cell; rows both sides appended are all kept. A cell both sides set to
-  different values takes ours, and the other value is reported.
+- sheet: rows are matched by their stable `row_ids`, so rows inserted or deleted in the
+  middle on one side don't shift the other side's edits; then cell by cell. Rows either side
+  added are all kept. A cell both sides set to different values takes ours, and the other
+  value is reported. Columns are matched by position.
 - slides: matched by each slide's stable `id`; title and body merge separately, bodies
   line by line (both versions kept on a clash).
 
@@ -16,6 +18,7 @@ part, nothing is dropped:
 both sides that differs.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
@@ -174,8 +177,8 @@ def _column_name(index: int) -> str:
     return name
 
 
-def _merge_rows(base: list, theirs: list, ours: list, conflicts: list[str], label) -> list:
-    """Index-aligned merge of a list whose items merge with `label`-reported clashes."""
+def _merge_columns(base: list, theirs: list, ours: list, conflicts: list[str]) -> list:
+    """Position-aligned merge of column headers."""
     lb, lt, lo = len(base), len(theirs), len(ours)
     out = []
     for i in range(min(lb, max(lt, lo))):
@@ -184,49 +187,112 @@ def _merge_rows(base: list, theirs: list, ours: list, conflicts: list[str], labe
         o = ours[i] if i < lo else _MISSING
         if t is _MISSING and o is _MISSING:
             continue
-        if t is _MISSING:  # theirs removed it: keep ours only if ours changed it
-            if o != b:
-                out.append(o)
+        if t is _MISSING or o is _MISSING:  # removed on one side: keep only if the other changed it
+            survivor = o if t is _MISSING else t
+            if survivor != b:
+                out.append(survivor)
             continue
-        if o is _MISSING:
-            if t != b:
-                out.append(t)
-            continue
-        out.append(label(i, b, t, o))
-    # Items appended past the base: both sides' additions are kept, ours first.
-    out += ours[lb:] + theirs[lb:]
+        value, clash = _pick(b, t, o)
+        if clash:
+            conflicts.append(f"Column {_column_name(i)} header: kept {o!r} over {t!r}")
+        out.append(value)
+    # Columns added past the base: both sides' additions are kept, ours first.
+    return out + ours[lb:] + theirs[lb:]
+
+
+def new_row_id() -> str:
+    return token_hex(4)
+
+
+def with_row_ids(count: int, ids: list | None) -> list[str]:
+    """One stable, unique id per row. Sheets saved before row ids existed get positional ids
+    (r0, r1, ...), the same on every read, so their stored revisions still line up."""
+    if ids is None:
+        return [f"r{i}" for i in range(count)]
+    seen: set[str] = set()
+    out = []
+    for i in range(count):
+        rid = ids[i] if i < len(ids) and isinstance(ids[i], str) and ids[i] else None
+        if rid is None or rid in seen:
+            rid = new_row_id()
+        seen.add(rid)
+        out.append(rid)
     return out
+
+
+def _keyed(content: dict, key: str) -> tuple[list[str], dict[str, list]]:
+    rows = content.get("rows", [])
+    ids = with_row_ids(len(rows), content.get(key))
+    return ids, dict(zip(ids, rows, strict=True))
 
 
 def merge_sheet(base: dict | None, theirs: dict, ours: dict) -> MergeResult:
     if base is None:
         base = theirs  # no shared history: ours wins where they differ, which is reported
     conflicts: list[str] = []
-
-    def column(i: int, b: Any, t: Any, o: Any) -> Any:
-        value, clash = _pick(b, t, o)
-        if clash:
-            conflicts.append(f"Column {_column_name(i)} header: kept {o!r} over {t!r}")
-        return value
-
-    columns = _merge_rows(base.get("columns", []), theirs.get("columns", []), ours.get("columns", []), conflicts, column)
+    columns = _merge_columns(base.get("columns", []), theirs.get("columns", []), ours.get("columns", []), conflicts)
     width = len(columns)
+    (b_ids, b_by), (t_ids, t_by), (o_ids, o_by) = (_keyed(x, "row_ids") for x in (base, theirs, ours))
 
-    def row(r: int, b: list, t: list, o: list) -> list:
-        cells = []
+    def cells(label: int, b: list, t: list, o: list) -> list:
+        out = []
         for c in range(max(len(b), len(t), len(o), width)):
             bv = b[c] if c < len(b) else None
             tv = t[c] if c < len(t) else None
             ov = o[c] if c < len(o) else None
             value, clash = _pick(bv, tv, ov)
             if clash:
-                conflicts.append(f"{_column_name(c)}{r + 1}: kept {ov!r} over {tv!r}")
-            cells.append(value)
-        return cells
+                conflicts.append(f"{_column_name(c)}{label}: kept {ov!r} over {tv!r}")
+            out.append(value)
+        return out
 
-    rows = _merge_rows(base.get("rows", []), theirs.get("rows", []), ours.get("rows", []), conflicts, row)
-    rows = [(list(r) + [None] * width)[:width] for r in rows]
-    return MergeResult({"columns": columns, "rows": rows}, conflicts)
+    def merged(rid: str) -> list | None:
+        b, t, o = b_by.get(rid), t_by.get(rid), o_by.get(rid)
+        if b is None:  # added on one side (ids are unique, so never both)
+            return o if o is not None else t
+        if t is None or o is None:  # deleted on one side: keep only if the other changed it
+            survivor = o if t is None else t
+            return survivor if survivor != b else None
+        return cells(o_ids.index(rid) + 1, b, t, o)
+
+    order = merge_order(b_ids, t_ids, o_ids, lambda rid: t_by[rid] != b_by[rid], lambda rid: o_by[rid] != b_by[rid])
+    kept = [(rid, row) for rid, row in ((rid, merged(rid)) for rid in order) if row is not None]
+    rows = [(list(r) + [None] * width)[:width] for _, r in kept]
+    return MergeResult({"columns": columns, "rows": rows, "row_ids": [rid for rid, _ in kept]}, conflicts)
+
+
+# ───────────── Ordering of id-keyed items (sheet rows, slides) ─────────────
+
+
+def merge_order(
+    base: list[str],
+    theirs: list[str],
+    ours: list[str],
+    theirs_changed: Callable[[str], bool],
+    ours_changed: Callable[[str], bool],
+) -> list[str]:
+    """Order of the merged items, by id. Follows ours, unless only theirs reordered the items
+    both kept. Items the other side has and the followed side lacks go after their predecessor:
+    always when added, and when the followed side deleted them only if the other side changed
+    them (whether a deleted-but-unchanged item really goes is up to the caller)."""
+    base_set, theirs_set, ours_set = set(base), set(theirs), set(ours)
+    common = [i for i in base if i in theirs_set and i in ours_set]
+    reordered_t = [i for i in theirs if i in base_set and i in ours_set] != common
+    reordered_o = [i for i in ours if i in base_set and i in theirs_set] != common
+    if reordered_t and not reordered_o:
+        order, other, other_changed = list(theirs), ours, ours_changed
+    else:
+        order, other, other_changed = list(ours), theirs, theirs_changed
+    other_set = set(other)
+    for idx, item in enumerate(other):
+        if item in order or (item in base_set and not other_changed(item)):
+            continue
+        at = max((order.index(x) for x in other[:idx] if x in order), default=-1) + 1
+        # Both sides inserted at the same spot: the followed side's new items come first.
+        while at < len(order) and order[at] not in base_set and order[at] not in other_set:
+            at += 1
+        order.insert(at, item)
+    return order
 
 
 # ───────────── Slides ─────────────
@@ -272,20 +338,13 @@ def merge_slides(base: dict | None, theirs: dict, ours: dict) -> MergeResult:
             conflicts.append(f"Slide “{title or 'Untitled'}”: kept both versions of changed lines")
         return {**b, **t, **o, "title": title, "body": "\n".join(body_lines)}
 
-    # Order: ours, unless only theirs reordered; slides theirs added go after their predecessor.
-    b_order, t_order, o_order = [s["id"] for s in b_list], [s["id"] for s in t_list], [s["id"] for s in o_list]
-    common = [i for i in b_order if i in t_by and i in o_by]
-    reordered_t = [i for i in t_order if i in common] != common
-    reordered_o = [i for i in o_order if i in common] != common
-    order = list(t_order if reordered_t and not reordered_o else o_order)
-    for sid in t_order:
-        if sid not in order and sid not in b_by:
-            before = t_order[: t_order.index(sid)]
-            anchor = max((order.index(x) for x in before if x in order), default=-1)
-            order.insert(anchor + 1, sid)
-    for sid in t_order:  # removed by ours but edited by theirs: keep where theirs had it
-        if sid not in order and sid in b_by and t_by[sid] != b_by[sid]:
-            order.append(sid)
+    order = merge_order(
+        [s["id"] for s in b_list],
+        [s["id"] for s in t_list],
+        [s["id"] for s in o_list],
+        lambda sid: t_by[sid] != b_by[sid],
+        lambda sid: o_by[sid] != b_by[sid],
+    )
     slides = [s for s in (merged(sid) for sid in order) if s is not None]
     return MergeResult({"slides": slides or [{"id": new_slide_id(), "title": "", "body": ""}]}, conflicts)
 

@@ -12,7 +12,10 @@ export interface DocBody {
 }
 export interface SheetBody {
   columns: string[]
+  /** Raw cells: text starting with "=" is a formula, evaluated for display (lib/formulas.ts). */
   rows: Cell[][]
+  /** One stable id per row, so rows inserted or deleted elsewhere merge correctly. */
+  row_ids?: string[]
 }
 export interface Slide {
   /** Stable across edits, so concurrent edits merge slide by slide. */
@@ -310,11 +313,43 @@ export const api = {
   share: (id: string, principal: string, role: Role) =>
     request<Share>(`/api/documents/${id}/shares`, { method: 'POST', body: JSON.stringify({ principal, role }) }),
   unshare: (id: string, shareId: number) => request<void>(`/api/documents/${id}/shares/${shareId}`, { method: 'DELETE' }),
+  /** Turn on the document's read-only public link (or get the one already on). */
+  publicLink: (id: string) =>
+    request<Share>(`/api/documents/${id}/shares`, { method: 'POST', body: JSON.stringify({ principal_type: 'public_link' }) }),
+  /** A document behind a public link; no sign-in, nothing of the reader's is sent. */
+  readPublic: async (token: string): Promise<PublicDoc> => {
+    let res: Response
+    try {
+      res = await fetch(`${BASE_URL}/api/public/${encodeURIComponent(token)}`)
+    } catch {
+      throw new NetworkError('Chia is unreachable')
+    }
+    if (!res.ok) throw new ApiError(res.status, res.status === 404 ? 'This link was turned off, or never existed' : res.statusText)
+    return res.json()
+  },
+  realtimeConfig: () => request<RealtimeConfig>('/api/realtime/config'),
   listKeys: () => request<AgentKey[]>('/api/keys'),
   createKey: (name: string, scope: { workspace_id?: string | null; role?: 'editor' | 'viewer' } = {}) =>
     request<AgentKey & { key: string }>('/api/keys', { method: 'POST', body: JSON.stringify({ name, ...scope }) }),
   revokeKey: (id: number) => request<void>(`/api/keys/${id}`, { method: 'DELETE' }),
 }
+
+export type PublicDoc = Pick<DocSummary, 'title' | 'revision' | 'updated_at'> &
+  ({ kind: 'doc'; content: DocBody } | { kind: 'sheet'; content: SheetBody } | { kind: 'slides'; content: SlidesBody })
+
+/** Where change notices come from: the API's own WebSocket, or AWS AppSync Events. */
+export interface RealtimeConfig {
+  backend: 'websocket' | 'aws_appsync'
+  personal_workspace_id: string
+  realtime_url?: string | null
+  http_host?: string | null
+  namespace?: string | null
+  auth?: 'lambda' | 'api_key' | null
+  api_key?: string | null
+}
+
+/** Link to a document's public, read-only page. */
+export const publicUrl = (token: string) => `${window.location.origin}/p/${token}`
 
 /** The realtime change feed (see lib/realtime.ts). */
 export const WS_URL = `${BASE_URL.replace(/^http/, 'ws')}/api/ws`

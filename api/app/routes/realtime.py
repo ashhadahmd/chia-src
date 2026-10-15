@@ -10,21 +10,35 @@ Browsers can't put a bearer token on a WebSocket, so the first message carries i
 
 The tab closes the socket while it is hidden and reconciles with one conditional request when it
 comes back, so idle tabs cost nothing.
+
+With REALTIME_BACKEND=aws_appsync (Lambda), tabs subscribe to AWS AppSync Events instead:
+`GET /api/realtime/config` tells them where, and `authorize_appsync` (wired up as the AppSync
+Lambda authorizer in app.lambda_handler) lets each user subscribe only to the workspace and
+document channels they may read, the same check this socket makes.
 """
 
 import asyncio
 import contextlib
 import json
+from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from sqlmodel import Session
 
 from app import realtime
+from app.config import get_settings
 from app.db import engine
+from app.deps import CurrentUser
 from app.models import Document, User
 from app.security import decode_access_token
-from app.workspaces import AccessError, check_doc_access, resolve_actor
+from app.workspaces import (
+    AccessError,
+    check_doc_access,
+    personal_workspace,
+    resolve_actor,
+)
 
 router = APIRouter(tags=["realtime"])
 
@@ -98,3 +112,70 @@ async def changes(ws: WebSocket) -> None:
         realtime.hub.unsubscribe(sub)
         if pump_task is not None:
             pump_task.cancel()
+
+
+# ───────────── AWS AppSync Events ─────────────
+
+
+class RealtimeConfig(BaseModel):
+    backend: Literal["websocket", "aws_appsync"]
+    personal_workspace_id: str
+    # AppSync only:
+    realtime_url: str | None = None  # wss://.../event/realtime
+    http_host: str | None = None  # the host AppSync expects in the auth header
+    namespace: str | None = None
+    auth: Literal["lambda", "api_key"] | None = None
+    api_key: str | None = None  # dev setups only (see APPSYNC_API_KEY)
+
+
+def _host(url: str) -> str:
+    return url.split("://", 1)[-1].split("/", 1)[0]
+
+
+@router.get("/realtime/config")
+def realtime_config(user: CurrentUser) -> RealtimeConfig:
+    """Where this tab listens for change notices."""
+    s = get_settings()
+    with Session(engine) as session:
+        assert user.id is not None
+        personal = personal_workspace(session, user.id).id
+    if s.realtime_backend != "aws_appsync" or not s.appsync_realtime_endpoint:
+        return RealtimeConfig(backend="websocket", personal_workspace_id=personal)
+    return RealtimeConfig(
+        backend="aws_appsync",
+        personal_workspace_id=personal,
+        realtime_url=s.appsync_realtime_endpoint.rstrip("/") + "/event/realtime",
+        http_host=_host(s.appsync_http_endpoint),
+        namespace=s.appsync_namespace,
+        auth="api_key" if s.appsync_api_key else "lambda",
+        api_key=s.appsync_api_key or None,
+    )
+
+
+def authorize_appsync(event: dict[str, Any]) -> dict[str, Any]:
+    """AppSync Events Lambda authorizer. The token is the user's Chia session (JWT). Connecting
+    needs a valid session; subscribing needs read access to the channel's workspace or document;
+    publishing is refused (only the API publishes, signed with IAM). Decisions aren't cached
+    (ttlOverride 0) because each one is for one channel."""
+    deny = {"isAuthorized": False, "ttlOverride": 0}
+    token = str(event.get("authorizationToken") or "").removeprefix("Bearer ").strip()
+    user_id = decode_access_token(token) if token else None
+    if user_id is None:
+        return deny
+    context = event.get("requestContext") or {}
+    operation = context.get("operation")
+    if operation == "EVENT_CONNECT":
+        allowed = True
+    elif operation == "EVENT_SUBSCRIBE":
+        target = realtime.parse_appsync_channel(get_settings().appsync_namespace, str(context.get("channel") or ""))
+        if target is None:
+            return deny
+        kind, ident = target
+        try:
+            _channels(user_id, ident if kind == "workspace" else None, ident if kind == "doc" else None)
+            allowed = True
+        except Refused:
+            allowed = False
+    else:
+        allowed = False
+    return {"isAuthorized": allowed, "ttlOverride": 0}

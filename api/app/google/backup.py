@@ -21,7 +21,7 @@ from datetime import timedelta
 from sqlalchemy import case, update
 from sqlmodel import Session, and_, col, or_, select
 
-from app import assets
+from app import assets, offload
 from app.db import engine
 from app.export import resolve_colors
 from app.google import oauth, workspace
@@ -105,7 +105,7 @@ def _sync(session: Session, doc_id: str) -> None:
         creds = oauth.credentials_for(session, doc.owner_id)
         assert creds is not None
         folder = _folder(session, creds, account)
-        content = doc.content or {}
+        content = offload.hydrate(doc.content, doc.s3_content_key) or {}
         file_id = doc.google_file_id if doc.google_file_id and workspace.is_live(creds, doc.google_file_id) else None
 
         if doc.kind is DocKind.doc:

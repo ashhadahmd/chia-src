@@ -9,18 +9,20 @@ another writer changed the document it shows.
 Delivery is pluggable:
 - `LocalHub` (default): in-process fan-out to the WebSocket connections this process holds.
   Right for local dev and for a single container.
-- Extra sinks (`add_sink`) receive every event too. Production hooks plug in here: an AWS API
-  Gateway WebSocket sink (look up connection ids subscribed to the channel, then
-  `apigatewaymanagementapi.post_to_connection`), Redis `PUBLISH`, or Postgres `pg_notify`
-  with each instance's listener feeding `hub.deliver`.
+- Extra sinks (`add_sink`) receive every event too. `AppSyncEventsSink` (REALTIME_BACKEND=
+  aws_appsync) publishes to AWS AppSync Events, which browsers subscribe to directly; that is
+  how realtime works on Lambda, where no process holds sockets. Redis `PUBLISH` or Postgres
+  `pg_notify` sinks would plug in the same way.
 """
 
 import asyncio
+import json
 import logging
 import threading
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 log = logging.getLogger("chia.realtime")
 
@@ -100,3 +102,76 @@ def publish(channels: list[str], event: Event) -> None:
             sink(channels, event)
         except Exception:
             log.exception("Realtime sink failed")
+
+
+# ───────────── AWS AppSync Events ─────────────
+
+
+def appsync_channel(namespace: str, channel: str) -> str:
+    """`workspace:<id>` -> `/<namespace>/workspace/<id>` (AppSync channel segments)."""
+    kind, _, ident = channel.partition(":")
+    return f"/{namespace}/{kind}/{ident}"
+
+
+def parse_appsync_channel(namespace: str, path: str) -> tuple[str, str] | None:
+    """`/<namespace>/workspace/<id>` -> ("workspace", id); None for anything else."""
+    parts = path.strip("/").split("/")
+    if len(parts) != 3 or parts[0] != namespace or parts[1] not in ("workspace", "doc") or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
+class AppSyncEventsSink:
+    """Publishes each event to AWS AppSync Events over HTTP (POST {endpoint}/event), one
+    request per channel. Signs with IAM (SigV4, the Lambda's role) unless an API key is given.
+    Runs inline after the commit, so a Lambda doesn't freeze with the publish half-sent; the
+    timeout is short and a failure only means tabs reconcile on their next resync."""
+
+    def __init__(self, endpoint: str, namespace: str, api_key: str = "", region: str | None = None, transport: Any = None) -> None:
+        import httpx
+
+        if not endpoint:
+            raise RuntimeError("REALTIME_BACKEND=aws_appsync needs APPSYNC_HTTP_ENDPOINT")
+        base = endpoint if "://" in endpoint else f"https://{endpoint}"
+        self.url = base.rstrip("/") + "/event"
+        self.namespace = namespace
+        self.api_key = api_key
+        self.region = region
+        self.client = httpx.Client(timeout=3.0, transport=transport)
+        self._signer: Any = None
+
+    def _signed_headers(self, body: bytes) -> dict[str, str]:
+        if self.api_key:
+            return {"content-type": "application/json", "x-api-key": self.api_key}
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        if self._signer is None:
+            import boto3
+
+            session = boto3.Session()
+            # The endpoint names its region (xxxx.appsync-api.<region>.amazonaws.com); a custom
+            # domain doesn't, so then the Lambda's own region applies.
+            host = (urlsplit(self.url).hostname or "").split(".")
+            from_host = host[2] if len(host) > 3 and host[1] == "appsync-api" else None
+            region = self.region or from_host or session.region_name
+            self._signer = SigV4Auth(session.get_credentials(), "appsync", region)
+        request = AWSRequest(method="POST", url=self.url, data=body, headers={"content-type": "application/json"})
+        self._signer.add_auth(request)
+        return dict(request.headers.items())
+
+    def __call__(self, channels: list[str], event: Event) -> None:
+        payload = json.dumps(event, separators=(",", ":"))
+        for channel in channels:
+            body = json.dumps({"channel": appsync_channel(self.namespace, channel), "events": [payload]}).encode()
+            response = self.client.post(self.url, content=body, headers=self._signed_headers(body))
+            response.raise_for_status()
+
+
+def configure() -> None:
+    """Hook up the sink REALTIME_BACKEND asks for. Called once at startup."""
+    from app.config import get_settings
+
+    s = get_settings()
+    if s.realtime_backend == "aws_appsync" and not any(isinstance(x, AppSyncEventsSink) for x in _sinks):
+        add_sink(AppSyncEventsSink(s.appsync_http_endpoint, s.appsync_namespace, s.appsync_api_key, s.appsync_region))

@@ -818,6 +818,21 @@
 .editor-status .badge {
   margin-left: 0;
 }
+.public-brand {
+  display: inline-flex;
+  margin-right: 6px;
+}
+.public-title {
+  margin: 0;
+  padding: 0 8px;
+  overflow: hidden;
+  font-size: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.public-updated {
+  color: var(--muted);
+}
 .editor-actions {
   display: flex;
   align-items: center;
@@ -971,6 +986,58 @@
 .sheet-add-col {
   width: 52px;
   text-align: center;
+}
+.sheet-row-btn {
+  width: 100%;
+  height: 38px;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.sheet-row-btn:hover,
+.sheet-row-btn[aria-expanded='true'] {
+  background: var(--kind-soft);
+  color: var(--ink);
+}
+.sheet-table input[data-formula]:not(:focus) {
+  color: var(--ink);
+}
+.sheet-table input[data-error]:not(:focus) {
+  color: var(--terracotta);
+  font-weight: 700;
+}
+.sheet-formula-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 720px);
+  height: 38px;
+  padding: 0 4px 0 12px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+.sheet-cell-name {
+  min-width: 34px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sheet-formula-bar input {
+  flex: 1;
+  height: 100%;
+  border: 0;
+  background: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+.sheet-formula-bar input:focus {
+  outline: none;
+}
+.select-option[data-danger] {
+  color: var(--terracotta);
 }
 
 .deck {
@@ -1497,9 +1564,13 @@
 .export-icon[data-app='powerpoint'] {
   --app: #c43e1c;
 }
+.export-icon[data-app='pdf'] {
+  --app: #d93a2b;
+}
 .export-icon[data-app='word'],
 .export-icon[data-app='excel'],
-.export-icon[data-app='powerpoint'] {
+.export-icon[data-app='powerpoint'],
+.export-icon[data-app='pdf'] {
   background: color-mix(in srgb, var(--app) 14%, transparent);
   color: var(--app);
 }
@@ -1689,6 +1760,124 @@
     background: #fff !important;
     color: #000 !important;
   }
+
+  html {
+    background: #fff !important;
+  }
+  /* Printing mid fade-in must not catch the page half transparent. */
+  .editor {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* Docs: the @page box gives the margins and the breaks, so the on-screen page frames
+     (tiptap-pagination-plus headers, footers, gaps, padding) step aside. */
+  .doc-page.rm-with-pagination,
+  .doc-page.rm-with-pagination[rm-pagination-disabled] {
+    min-height: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+  }
+  .doc-page.rm-with-pagination .rm-pages-wrapper,
+  .doc-page.rm-with-pagination .rm-page-header,
+  .doc-page.rm-with-pagination .rm-page-footer {
+    display: none !important;
+  }
+  /* Docs: keep headings with what follows, and pictures, rows and quotes whole. */
+  .doc-page :is(h1, h2, h3) {
+    break-after: avoid;
+  }
+  .doc-page :is(figure, img, tr, pre, blockquote) {
+    break-inside: avoid;
+  }
+
+  /* Sheets: the whole grid, values as shown (formulas evaluated). */
+  .sheet-formula-bar,
+  .sheet + .btn,
+  .sheet > .btn,
+  .sheet-add-col {
+    display: none !important;
+  }
+  .sheet,
+  .sheet-scroll {
+    display: block !important;
+    max-width: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    background: #fff !important;
+  }
+  .sheet-table {
+    color: #000;
+  }
+  .sheet-table th,
+  .sheet-table td {
+    box-shadow: inset -1px -1px 0 #c8c8c8 !important;
+  }
+  .sheet-table th,
+  .sheet-corner,
+  .sheet-rownum {
+    background: #ededed !important;
+    color: #000 !important;
+  }
+  .sheet-table thead {
+    display: table-header-group;
+  }
+  .sheet-table tr {
+    break-inside: avoid;
+  }
+  .sheet-table input {
+    width: auto;
+    min-width: 0;
+    field-sizing: content;
+    color: #000 !important;
+  }
+  .sheet-row-btn {
+    color: #000 !important;
+  }
+
+  /* Slides: the editor steps aside for every slide, one per page. */
+  .deck > :not(.print-deck) {
+    display: none !important;
+  }
+  .deck {
+    display: block !important;
+    max-width: none !important;
+  }
+  .print-deck {
+    display: block !important;
+  }
+}
+
+.print-deck {
+  display: none;
+}
+.print-slide {
+  box-sizing: border-box;
+  width: 13.333in;
+  height: 7.5in;
+  padding: 0.7in 0.9in;
+  overflow: hidden;
+  background: #fff;
+  color: #1c1c1a;
+  break-after: page;
+  font-size: 22pt;
+  line-height: 1.4;
+}
+.print-slide:last-child {
+  break-after: auto;
+}
+.slide-face-title {
+  margin: 0 0 0.45em;
+  font-family: var(--font-display);
+  font-size: 40pt;
+  line-height: 1.15;
+}
+.print-slide ul {
+  margin: 0 0 0.4em;
+  padding-left: 1.2em;
+}
+.print-slide p {
+  margin: 0 0 0.4em;
 }
 
 /* ───────────── Tooltips ───────────── */
@@ -2941,6 +3130,80 @@
   font-size: 13px;
   font-weight: 650;
   color: var(--muted);
+}
+.public-link {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-sunk);
+}
+.public-link-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.public-link-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+}
+.public-link[data-on] .public-link-icon {
+  background: var(--sage-soft, var(--kind-soft));
+  color: var(--sage, var(--ink));
+}
+.public-link-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.public-link-title {
+  font-weight: 700;
+}
+.public-link-sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--line-strong, var(--line));
+  transition: background-color 0.2s ease;
+}
+.switch[aria-checked='true'] {
+  background: var(--ink);
+}
+.switch:disabled {
+  opacity: 0.6;
+}
+.switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  transition: transform 0.2s cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+.switch[aria-checked='true'] .switch-knob {
+  transform: translateX(16px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch-knob {
+    transition: none;
+  }
 }
 .agent-scope {
   display: flex;

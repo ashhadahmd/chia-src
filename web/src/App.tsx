@@ -10,6 +10,7 @@ import Login from './pages/Login'
 import Library from './pages/Library'
 import Editor from './pages/Editor'
 import AuthGoogle from './pages/AuthGoogle'
+import PublicView from './pages/PublicView'
 import './App.css'
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -43,6 +44,7 @@ export default function App() {
             <Route path="/auth/google" element={<AuthGoogle />} />
             <Route path="/" element={<RequireAuth><Library /></RequireAuth>} />
             <Route path="/d/:id" element={<RequireAuth><Editor /></RequireAuth>} />
+            <Route path="/p/:token" element={<PublicView />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </AuthProvider>

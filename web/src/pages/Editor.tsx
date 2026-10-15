@@ -1,14 +1,17 @@
-import { ArrowLeft, Check, CloudArrowUp, CloudCheck, CloudSlash, Eye, Plus, Printer, Robot, ShareNetwork, Trash, WarningCircle } from '@phosphor-icons/react'
+import { ArrowLeft, Check, CloudArrowUp, CloudCheck, CloudSlash, Eye, Printer, Robot, ShareNetwork, WarningCircle } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import DocEditor from '../components/DocEditor'
+import SheetEditor from '../components/SheetEditor'
+import SlidesEditor from '../components/SlidesEditor'
 import ExportMenu, { type DocActions } from '../components/ExportMenu'
 import ShareDialog from '../components/ShareDialog'
-import { api, ApiError, NetworkError, type Cell, type Doc, type DocSaved, type GoogleStatus, type SheetBody, type SlidesBody } from '../lib/api'
+import { api, ApiError, NetworkError, type Doc, type DocSaved, type GoogleStatus } from '../lib/api'
 import { KINDS, softSpring } from '../lib/kinds'
 import { local, type PendingSave } from '../lib/localStore'
 import { claimDoc } from '../lib/outbox'
+import { printNow, usePrintSetup } from '../lib/print'
 import { onChange, onResync, watchDocument } from '../lib/realtime'
 
 type SyncState = 'idle' | 'local' | 'synced' | 'offline' | 'error'
@@ -204,126 +207,6 @@ function DriveBadge({ google, doc }: { google: GoogleStatus | null; doc: Doc }) 
   )
 }
 
-function SheetEditor({ body, onChange, readOnly }: { body: SheetBody; onChange: (b: SheetBody) => void; readOnly: boolean }) {
-  const setCell = (r: number, c: number, value: Cell) =>
-    onChange({ ...body, rows: body.rows.map((row, i) => (i === r ? row.map((v, j) => (j === c ? value : v)) : row)) })
-  const setColumn = (c: number, name: string) => onChange({ ...body, columns: body.columns.map((v, j) => (j === c ? name : v)) })
-  const addRow = () => onChange({ ...body, rows: [...body.rows, body.columns.map(() => '')] })
-  const addColumn = () =>
-    onChange({ columns: [...body.columns, String.fromCharCode(65 + (body.columns.length % 26))], rows: body.rows.map((r) => [...r, '']) })
-
-  return (
-    <div className="sheet">
-      <div className="sheet-scroll">
-        <table className="sheet-table">
-          <thead>
-            <tr>
-              <th className="sheet-corner" aria-hidden="true" />
-              {body.columns.map((col, c) => (
-                <th key={c}>
-                  <input value={col} readOnly={readOnly} onChange={(e) => setColumn(c, e.target.value)} aria-label={`Column ${c + 1} name`} />
-                </th>
-              ))}
-              <th className="sheet-add-col">
-                {!readOnly && (
-                  <button className="icon-btn" onClick={addColumn} aria-label="Add column" title="Add column">
-                    <Plus size={16} weight="bold" />
-                  </button>
-                )}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {body.rows.map((row, r) => (
-              <tr key={r}>
-                <td className="sheet-rownum">{r + 1}</td>
-                {row.map((cell, c) => (
-                  <td key={c}>
-                    <input
-                      value={cell ?? ''}
-                      readOnly={readOnly}
-                      onChange={(e) => setCell(r, c, e.target.value)}
-                      aria-label={`Row ${r + 1}, ${body.columns[c]}`}
-                      data-numeric={typeof cell === 'number' || (cell !== '' && cell !== null && !Number.isNaN(Number(cell)))}
-                    />
-                  </td>
-                ))}
-                <td />
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {!readOnly && (
-        <button className="btn btn-ghost" onClick={addRow}>
-          <Plus size={16} weight="bold" /> Add row
-        </button>
-      )}
-    </div>
-  )
-}
-
-/** A short random id for a new slide, so edits to it can be matched up with other people's. */
-const slideId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8)
-
-function SlidesEditor({ body, onChange, readOnly }: { body: SlidesBody; onChange: (b: SlidesBody) => void; readOnly: boolean }) {
-  const [current, setCurrent] = useState(0)
-  const slides = body.slides.length ? body.slides : [{ id: 'first', title: '', body: '' }]
-  const index = Math.min(current, slides.length - 1)
-  const slide = slides[index]
-
-  const update = (patch: Partial<typeof slide>) => onChange({ slides: slides.map((s, i) => (i === index ? { ...s, ...patch } : s)) })
-  const add = () => {
-    onChange({ slides: [...slides.slice(0, index + 1), { id: slideId(), title: '', body: '' }, ...slides.slice(index + 1)] })
-    setCurrent(index + 1)
-  }
-  const remove = () => {
-    if (slides.length === 1) return
-    onChange({ slides: slides.filter((_, i) => i !== index) })
-    setCurrent(Math.max(0, index - 1))
-  }
-
-  return (
-    <div className="deck">
-      <ol className="filmstrip" aria-label="Slides">
-        {slides.map((s, i) => (
-          <motion.li key={s.id ?? i} layout>
-            <button className="film" data-active={i === index} onClick={() => setCurrent(i)}>
-              <span className="film-num">{i + 1}</span>
-              <span className="film-frame">
-                <span className="film-title">{s.title || 'Untitled'}</span>
-              </span>
-            </button>
-          </motion.li>
-        ))}
-        {!readOnly && (
-          <li>
-            <button className="film film-add" onClick={add} aria-label="Add slide">
-              <Plus size={18} weight="bold" />
-            </button>
-          </li>
-        )}
-      </ol>
-      <AnimatePresence mode="wait">
-        <motion.section
-          key={slide.id ?? index}
-          className="stage"
-          initial={{ opacity: 0, scale: 0.97, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
-          transition={softSpring}
-        >
-          <input className="stage-title" readOnly={readOnly} value={slide.title} onChange={(e) => update({ title: e.target.value })} placeholder="Slide title" />
-          <textarea className="stage-body" readOnly={readOnly} value={slide.body} onChange={(e) => update({ body: e.target.value })} placeholder="Points or notes. Lines starting with - become bullets" />
-          <button className="icon-btn stage-remove" onClick={remove} disabled={readOnly || slides.length === 1} aria-label="Delete slide" title="Delete slide">
-            <Trash />
-          </button>
-        </motion.section>
-      </AnimatePresence>
-    </div>
-  )
-}
-
 export default function Editor() {
   const { id } = useParams()
   const [doc, setDoc] = useState<Doc | null>(null)
@@ -458,6 +341,8 @@ export default function Editor() {
     [idle, pullLatest, flush],
   )
 
+  usePrintSetup(doc?.kind)
+
   if (missing)
     return (
       <main className="editor">
@@ -484,6 +369,7 @@ export default function Editor() {
   const setContent = (content: Doc['content']) => edit({ content })
 
   const actions: DocActions = {
+    print: printNow,
     exportFile: async (format, background) => {
       await flush() // export what is on screen, not the last autosave
       await api.exportFile(doc.id, format, doc.title, background)
@@ -564,11 +450,9 @@ export default function Editor() {
                 <ShareNetwork size={16} weight="bold" /> Share
               </button>
             )}
-            {doc.kind === 'doc' && (
-              <button type="button" className="icon-btn" aria-label="Print" title="Print (Ctrl+P)" onClick={() => window.print()}>
-                <Printer />
-              </button>
-            )}
+            <button type="button" className="icon-btn" aria-label="Print" title="Print or save as PDF (Ctrl+P)" onClick={printNow}>
+              <Printer />
+            </button>
             <ExportMenu kind={doc.kind} actions={actions} />
           </div>
         </div>

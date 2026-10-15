@@ -2,7 +2,7 @@
 
 A calm home for docs, sheets and slides, with its own editor, plus an MCP endpoint that lets local AI agents create documents. Signing in with Google, or linking Google later, turns on automatic Drive backup.
 
-- `api/`: FastAPI, the official MCP Python SDK, Google API clients, WeasyPrint (PDF) and python-docx (Word)
+- `api/`: FastAPI, the official MCP Python SDK and Google API clients. WeasyPrint, python-docx, python-pptx and openpyxl load only when a server-side export runs, so the API starts fast (and fits a slim Lambda)
 - `web/`: React with a TipTap editor (bold, italic, underline, font size, alignment, Letter/A4 pages, a right-click format menu, print, and export). The editor header follows Google Docs: title and save status on top, then a tool strip whose groups move into a ⋮ menu when the window is narrow
 
 ## Run
@@ -49,15 +49,16 @@ Legacy `.doc`, `.xls`, `.ppt` and OpenDocument files are refused with a "save as
 
 ## Storage, backup and export
 
-- **Storage:** Chia's database is the source of truth: SQLite locally, Postgres (`DATABASE_URL=postgresql+psycopg://...`) in production. Schema changes are Alembic migrations in `api/migrations` (`uv run alembic upgrade head`; the API runs it on startup unless `AUTO_MIGRATE=false`).
-- **Workspaces:** every user has a personal workspace, and requests without an `X-Workspace-Id` header use it, so solo use needs no setup. Teams create `team` or `enterprise` workspaces (`/api/workspaces`) with owner, admin, editor and viewer roles, and single documents can be shared with a person or one agent's key (`/api/documents/{id}/shares`).
+- **Storage:** Chia's database is the source of truth: SQLite locally, Postgres (`DATABASE_URL=postgresql+psycopg://...`) in production. Schema changes are Alembic migrations in `api/migrations` (`uv run alembic upgrade head`; the API runs it on startup unless `AUTO_MIGRATE=false`). Document bodies larger than `INLINE_CONTENT_MAX_BYTES` (64 KB of JSON by default) are gzipped into blob storage as `docs/{id}/rev-{revision}-{nonce}.json.gz`, with a stub in the row; reads fetch them transparently, and blobs go when their last revision snapshot is pruned or the document is deleted.
+- **Workspaces:** every user has a personal workspace, and requests without an `X-Workspace-Id` header use it, so solo use needs no setup. Teams create `team` or `enterprise` workspaces (`/api/workspaces`) with owner, admin, editor and viewer roles, and single documents can be shared with a person or one agent's key (`/api/documents/{id}/shares`). Documents shared with you from another workspace carry a **Shared** badge in your library.
+- **Public links:** **Share › Public link** gives a read-only link, `/p/{token}`, that anyone can open without signing in (`POST /api/documents/{id}/shares {"principal_type": "public_link"}`; the page reads `GET /api/public/{token}`). Turning it off (deleting the share) revokes it at once.
 - **Backup:** for users signed in with or linked to Google, each document is mirrored as a native Google Doc, Sheet or Slides file in a `Chia` folder in the creator's Drive. Saves mark the document `pending`; the mirror is written about 4 seconds after the last edit by a runner inside the API (`DRIVE_SYNC_RUNNER=local`) or by `app.worker` (a scheduled Lambda or `uv run python -m app.worker`). The state lives in the database, so pending backups survive restarts.
 - **Export:** the **Export** button in every editor.
-  - Docs: `GET /api/documents/{id}/export/pdf?background=%23F7F4ED` (PDF with any page colour) and `GET .../export/docx` (Word).
+  - PDF, all kinds: **Export › PDF** (or Ctrl+P) opens the browser's print dialog; **Save as PDF** gives a vector PDF with no server work. Docs print on their Letter/A4 pages, slides one per 16:9 landscape page, sheets on landscape paper with formulas evaluated.
+  - Docs: `GET /api/documents/{id}/export/pdf?background=%23F7F4ED` (server-rendered PDF with any page colour; answers 501 where WeasyPrint's native libraries aren't installed) and `GET .../export/docx` (Word).
   - Sheets: `GET .../export/xlsx` (Excel, grey frozen header row).
   - Slides: `GET .../export/pptx` (16:9 PowerPoint; lines starting with `- ` become bullets).
   - All kinds: `POST .../export/google` syncs the Drive copy and returns its Google Docs, Sheets or Slides URL.
-- **Printing:** uses real `@page` sizes and always prints in light colours.
 
 ## Connect AI agents over MCP
 
@@ -81,18 +82,22 @@ Tools:
 
 Results include `chia_url`, which opens the document in Chia, and `drive_url` once the document has a Drive backup. Tools carry read-only and destructive hints, so clients can decide which calls need approval.
 
-**Live edits.** Nothing polls. Open tabs keep one WebSocket (`/api/ws`) that pushes a small notice whenever someone, or an agent, creates, changes or deletes a document in the workspace or the open document. A hidden tab closes it, and a tab that comes back checks once with an ETag (`If-None-Match`, usually answered 304). Library cards name the agent that last changed or created a document.
+**Live edits.** Nothing polls. Open tabs keep one WebSocket (`/api/ws`) that pushes a small notice whenever someone, or an agent, creates, changes or deletes a document in the workspace or the open document. A hidden tab closes it, and a tab that comes back checks once with an ETag (`If-None-Match`, usually answered 304). Library cards name the agent that last changed or created a document. With `REALTIME_BACKEND=aws_appsync` (Lambda, which can't hold sockets) the API also publishes each notice to AWS AppSync Events (`APPSYNC_HTTP_ENDPOINT`, signed with IAM), and tabs subscribe there instead (`APPSYNC_REALTIME_ENDPOINT`, found through `GET /api/realtime/config`); the AppSync Lambda authorizer `app.lambda_handler.appsync_authorizer` lets each user subscribe only to channels they may read.
 
 **Saving and merging.** Edits land in the browser's IndexedDB at once ("Saved locally"), then go to the server ("Synced"). Offline edits wait in the same place ("Offline · saved on this device") and go out when the network returns, even after a reload. Each save carries the revision it builds on. When an agent saved in between, the server merges the two three ways instead of refusing: docs paragraph by paragraph, sheets cell by cell, slides slide by slide (each slide has a stable `id`). A part both sides changed keeps both versions. The server keeps the last 10 revisions of each document for this; an older save still merges, keeping everything from both sides.
 
+## AWS Lambda
+
+`app.lambda_handler` has the entry points: `api_handler` (the whole API, REST and MCP, through Mangum), `migrate_handler` (run once per deploy, with `AUTO_MIGRATE=false` on the API) and `appsync_authorizer`; Drive backups run in `app.worker.handler`. Set `MCP_ALLOWED_HOSTS` to the domain MCP clients use (MCP refuses other `Host` headers), `STORAGE_BACKEND=s3`, `DRIVE_SYNC_RUNNER=external` and `REALTIME_BACKEND=aws_appsync`.
+
 ## Tests
 
-`cd api && uv run pytest` runs the end-to-end suite (HTTP API, MCP, WebSocket) on a throwaway SQLite database; set `TEST_DATABASE_URL` to an empty Postgres database to run it there.
+`cd api && uv run pytest` runs the end-to-end suite (HTTP API, MCP, WebSocket, the Lambda handler, AppSync sink and authorizer) on a throwaway SQLite database; set `TEST_DATABASE_URL` to an empty Postgres database to run it there. `cd web && npm test` runs the sheet formula tests (Node's test runner); pytest runs them too when Node is installed.
 
 ## Content shapes
 
 | Kind | Shape |
 | --- | --- |
 | doc | `{ "html": "...", "page": "letter" \| "a4" }`. MCP clients may send `{ "markdown": "..." }` instead; pipe tables and ```` ```mermaid ```` blocks are supported. |
-| sheet | `{ "columns": [...], "rows": [[...]] }`. A value starting with `=` becomes a formula in Google Sheets. |
+| sheet | `{ "columns": [...], "rows": [[...]], "row_ids": [...] }`. A value starting with `=` is a formula: the editor shows its result, while storage, MCP and exports keep the formula (Google Sheets and Excel evaluate it). Supported in the editor: cell references (`A1` is the first row under the header), ranges, `+ - * / ^ & %`, comparisons, `SUM`, `AVERAGE`/`AVG`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`, `ROUND`, `CONCAT`; errors show as `#ERROR!`, `#DIV/0!`, `#REF!`, `#NAME?`, `#VALUE!` or `#CYCLE!`. `row_ids` are optional on input (filled in) and keep rows matched when rows are inserted or deleted concurrently. |
 | slides | `{ "slides": [{ "id", "title", "body" }] }`. `id` is optional on input and kept stable afterwards. Body lines starting with `- ` become bullets in Google Slides. |

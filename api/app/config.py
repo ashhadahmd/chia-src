@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # at once (AWS Lambda) and migrate from the deploy pipeline instead.
     auto_migrate: bool = True
     cors_origins: list[str] = ["http://localhost:5173"]
+    # Host names MCP clients reach this API by, besides localhost (e.g. the API Gateway or
+    # custom domain). MCP's DNS-rebinding guard answers 421 to any other Host header.
+    mcp_allowed_hosts: list[str] = []
 
     # Where image bytes live. "local" needs no AWS setup; "s3" serves them through presigned URLs.
     storage_backend: Literal["local", "s3"] = "local"
@@ -31,6 +34,22 @@ class Settings(BaseSettings):
     s3_region: str | None = None
     s3_endpoint_url: str | None = None  # MinIO / LocalStack
     presigned_url_seconds: int = 3600
+    # Document bodies (and their revision snapshots) larger than this, as JSON, are gzipped into
+    # the blob storage above; the row keeps a small stub. Keeps Postgres rows and Lambda payloads small.
+    inline_content_max_bytes: int = 65536
+
+    # Where change notices go besides this process's own WebSockets (/api/ws).
+    # "aws_appsync": also publish to AWS AppSync Events, which browsers subscribe to directly
+    # (Lambda has no long-lived sockets). Publishing signs with IAM (SigV4) unless an API key is set.
+    realtime_backend: Literal["local", "aws_appsync"] = "local"
+    appsync_http_endpoint: str = ""  # e.g. https://xxxx.appsync-api.us-east-1.amazonaws.com
+    appsync_realtime_endpoint: str = ""  # e.g. wss://xxxx.appsync-realtime-api.us-east-1.amazonaws.com
+    appsync_namespace: str = "chia"
+    appsync_region: str | None = None
+    # Dev only: browsers also receive this key and could subscribe to any channel. In production
+    # leave it empty: the server publishes with IAM and browsers subscribe through the Lambda
+    # authorizer in app.lambda_handler, which checks each channel against the user's access.
+    appsync_api_key: str = ""
 
     # Who runs Google Drive backups. "local": a loop inside the API process (dev).
     # "external": a separate worker calls app.worker (SQS/EventBridge-triggered Lambda in AWS).

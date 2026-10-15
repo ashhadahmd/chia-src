@@ -1,4 +1,5 @@
 import re
+from secrets import token_urlsafe
 from typing import Annotated
 from urllib.parse import quote
 
@@ -127,16 +128,17 @@ def delete_document(doc_id: str, session: SessionDep, actor: CurrentActor, backg
 
 class ShareCreate(BaseModel):
     principal_type: PrincipalType = PrincipalType.user
-    # A user's email or username, or an API key id (principal_type "apikey").
-    principal: str
+    # A user's email or username, or an API key id (principal_type "apikey"). Ignored for
+    # "public_link", whose token the server makes.
+    principal: str = ""
     role: Role = Role.viewer
 
 
 class ShareRead(BaseModel):
     id: int
     principal_type: PrincipalType
-    principal_id: str
-    label: str  # the person's username or the agent key's name
+    principal_id: str  # for a public link: its token (the link is /p/{token})
+    label: str  # the person's username, the agent key's name, or "Anyone with the link"
     role: Role
 
 
@@ -148,6 +150,8 @@ def _share_read(session: SessionDep, row: DocumentShare) -> ShareRead:
     elif row.principal_type is PrincipalType.apikey:
         key = session.get(ApiKey, int(row.principal_id))
         target = key.name if key else None
+    else:
+        target = "Anyone with the link"
     return ShareRead(**row.model_dump(), label=target or "(removed)")
 
 
@@ -160,11 +164,22 @@ def list_shares(doc_id: str, session: SessionDep, actor: CurrentActor) -> list[S
 
 @router.post("/{doc_id}/shares", status_code=status.HTTP_201_CREATED)
 def share(doc_id: str, body: ShareCreate, session: SessionDep, actor: CurrentActor) -> ShareRead:
-    """Give one person (or one AI agent's key) access to this document alone. Public links
-    arrive with the local-first sharing work."""
+    """Give one person (or one AI agent's key) access to this document alone, or turn on a
+    read-only public link (principal_type "public_link"; calling again returns the same link)."""
     doc = documents.get_document(session, actor, doc_id, Role.admin)
     if body.role not in (Role.editor, Role.viewer):
         raise DocumentError(422, "A share's role is editor or viewer")
+    if body.principal_type is PrincipalType.public_link:
+        existing = session.exec(
+            select(DocumentShare).where(DocumentShare.document_id == doc.id, DocumentShare.principal_type == PrincipalType.public_link)
+        ).first()
+        if existing is None:
+            # Links are read-only: anyone holding one can read, never write.
+            existing = DocumentShare(document_id=doc.id, principal_type=PrincipalType.public_link, principal_id=token_urlsafe(24), role=Role.viewer)
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+        return _share_read(session, existing)
     if body.principal_type is PrincipalType.user:
         who = body.principal.strip().lower()
         target = session.exec(select(User).where(or_(func.lower(User.email) == who, func.lower(User.username) == who))).first()
@@ -176,8 +191,6 @@ def share(doc_id: str, body: ShareCreate, session: SessionDep, actor: CurrentAct
         if key is None or key.user_id != actor.user_id:
             raise DocumentError(404, "No API key of yours with that id")
         principal_id = str(key.id)
-    else:
-        raise DocumentError(422, "Public links aren't available yet")
     row = session.exec(
         select(DocumentShare).where(
             DocumentShare.document_id == doc.id,
@@ -315,13 +328,18 @@ async def export_pdf(
     actor: CurrentActor,
     background: Annotated[str | None, Query(description="Page colour, e.g. #FAF8F5; default white")] = None,
 ) -> Response:
+    """Server-rendered PDF, a fallback: the app prints PDFs in the browser. Answers 501 where
+    WeasyPrint's native libraries aren't installed (the slim API Lambda)."""
     doc, html, page = _text_doc(session, actor, doc_id)
     try:
         bg = export.parse_background(background)
     except ValueError as exc:
         raise DocumentError(422, str(exc)) from exc
     resolve = assets.resolver(session, html)
-    pdf = await run_in_threadpool(export.to_pdf, doc.title, html, page, bg, resolve)
+    try:
+        pdf = await run_in_threadpool(export.to_pdf, doc.title, html, page, bg, resolve)
+    except export.PdfUnavailable as exc:
+        raise DocumentError(501, f"{exc}. Use Print, then Save as PDF.") from exc
     return _download(pdf, doc.title, "pdf", "application/pdf")
 
 

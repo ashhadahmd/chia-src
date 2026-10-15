@@ -32,8 +32,11 @@ class PageSize(StrEnum):
 #   doc    -> {"html": str, "page": "letter" | "a4"}   (html from the editor: p, h1-h3,
 #             lists, strong/em/u, <span style="font-size">, text-align, tables, images
 #             <img src="/api/assets/{id}"> and diagrams <figure data-type="diagram">)
-#   sheet  -> {"columns": [str], "rows": [[str | number | bool | null]]}
-#   slides -> {"slides": [{"title": str, "body": str}]}
+#   sheet  -> {"columns": [str], "rows": [[str | number | bool | null]], "row_ids": [str]}
+#             (strings starting with "=" are formulas, evaluated in the browser; row_ids are
+#             stable per row so concurrent row inserts/deletes merge, see app.merge)
+#   slides -> {"slides": [{"id": str, "title": str, "body": str}]}
+# Bodies over INLINE_CONTENT_MAX_BYTES are kept in blob storage (see app.offload).
 EMPTY_CONTENT: dict[DocKind, dict[str, Any]] = {
     DocKind.doc: {"html": "", "page": "letter"},
     DocKind.sheet: {"columns": ["A", "B", "C", "D"], "rows": [["", "", "", ""] for _ in range(8)]},
@@ -162,6 +165,9 @@ class Document(SQLModel, table=True):
     kind: DocKind = Field(sa_type=_enum(DocKind), index=True)
     title: str = "Untitled"
     content: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    # Set when the body is too big to keep inline: `content` is then a stub and the body is in
+    # blob storage under this key (see app.offload). Read bodies through documents.content_of.
+    s3_content_key: str | None = None
     source: str = "ui"  # "ui" or "mcp"
     # Bumped on every change; the editor sends the revision it last saw so a save can't
     # silently overwrite an AI agent's edit (and notices those edits while the doc is open).
@@ -185,12 +191,14 @@ class Document(SQLModel, table=True):
 
 class DocumentSnapshot(SQLModel, table=True):
     """Content as of one revision, kept for the last few revisions of each document so a save
-    built on an older revision can be merged three ways (see app.merge). zlib-compressed JSON."""
+    built on an older revision can be merged three ways (see app.merge). zlib-compressed JSON,
+    or empty with `s3_content_key` naming the offloaded body (shared with the document row)."""
 
     document_id: str = Field(foreign_key="document.id", primary_key=True)
     revision: int = Field(primary_key=True)
     title: str
     content_z: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    s3_content_key: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -255,7 +263,7 @@ class DocumentSummary(SQLModel):
     @classmethod
     def of(cls, doc: Document) -> DocumentSummary:
         url = GOOGLE_URLS[doc.kind].format(doc.google_file_id) if doc.google_file_id else None
-        return cls(**doc.model_dump(exclude={"content", "search_text"}), drive_url=url)
+        return cls(**doc.model_dump(exclude={"content", "search_text", "s3_content_key"}), drive_url=url)
 
 
 class DocumentRead(DocumentSummary):

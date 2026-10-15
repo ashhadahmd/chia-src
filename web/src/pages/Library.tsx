@@ -187,6 +187,9 @@ export default function Library() {
   const navigate = useNavigate()
   const [filter] = useFilter()
   const { docs, update: setDocs } = useLibrary()
+  const { current: workspace } = useWorkspaces()
+  // Shared with you from someone else's workspace (the personal library lists those too).
+  const sharedIn = (doc: DocSummary) => !!workspace && doc.workspace_id !== workspace.id
   const [query, setQuery] = useState('')
   const [google, setGoogle] = useState<GoogleStatus | null>(null)
   const [task, setTask] = useState<ImportTask | null>(null)
@@ -404,7 +407,7 @@ export default function Library() {
               {view === 'grid' ? (
                 <ul className="grid">
                   <AnimatePresence mode="popLayout">
-                    {visible.map((doc, i) => <DocCard key={doc.id} doc={doc} index={i} onDelete={remove} />)}
+                    {visible.map((doc, i) => <DocCard key={doc.id} doc={doc} index={i} shared={sharedIn(doc)} onDelete={remove} />)}
                   </AnimatePresence>
                 </ul>
               ) : (
@@ -416,7 +419,7 @@ export default function Library() {
                   </div>
                   <ul className="doc-list">
                     <AnimatePresence mode="popLayout">
-                      {visible.map((doc, i) => <DocRow key={doc.id} doc={doc} index={i} onDelete={remove} />)}
+                      {visible.map((doc, i) => <DocRow key={doc.id} doc={doc} index={i} shared={sharedIn(doc)} onDelete={remove} />)}
                     </AnimatePresence>
                   </ul>
                 </div>

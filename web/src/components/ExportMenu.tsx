@@ -1,4 +1,4 @@
-import { CaretDown, DownloadSimple, FileDoc, FilePdf, FilePpt, FileXls, type Icon } from '@phosphor-icons/react'
+import { CaretDown, DownloadSimple, FileDoc, FilePdf, FilePpt, FileXls, Printer, type Icon } from '@phosphor-icons/react'
 import { useState } from 'react'
 import type { DocKind, ExportFormat } from '../lib/api'
 import { GoogleAppIcon } from './BrandIcons'
@@ -23,6 +23,8 @@ const OFFICE: Record<DocKind, { format: ExportFormat; app: string; icon: Icon; l
 const GOOGLE_APP: Record<DocKind, string> = { doc: 'Google Docs', sheet: 'Google Sheets', slides: 'Google Slides' }
 
 export interface DocActions {
+  /** Print, or "Save as PDF" in the print dialog: made in the browser, instantly. */
+  print: () => void
   exportFile: (format: ExportFormat, background?: string) => Promise<void>
   exportGoogle: (() => Promise<void>) | null // null when Google is not connected
 }
@@ -34,7 +36,7 @@ export default function ExportMenu({ kind, actions }: { kind: DocKind; actions: 
   const google = GOOGLE_APP[kind]
   const { bind, node } = useTooltip({
     label: 'Export',
-    hint: kind === 'doc' ? 'Download as PDF or Word, or open in Google Docs' : `Download for ${office.label.split(' ')[0]}, or open in ${google}`,
+    hint: kind === 'doc' ? 'Save as PDF or Word, or open in Google Docs' : `Save as PDF, download for ${office.label.split(' ')[0]}, or open in ${google}`,
   })
   const run = async (key: string, fn: () => Promise<void>, close: () => void) => {
     setBusy(key)
@@ -62,12 +64,31 @@ export default function ExportMenu({ kind, actions }: { kind: DocKind; actions: 
     >
       {(close) => (
         <div className="export-menu">
+          <button
+            className="popover-item"
+            disabled={busy !== null}
+            onClick={() => {
+              close()
+              // After the menu has gone, so it isn't in the printout.
+              requestAnimationFrame(() => actions.print())
+            }}
+          >
+            <span className="popover-icon export-icon" data-app="pdf">
+              <FilePdf weight="fill" />
+            </span>
+            <span>
+              <span className="popover-label">PDF</span>
+              <span className="popover-hint">
+                <Printer size={12} /> Print, or choose Save as PDF
+              </span>
+            </span>
+          </button>
           {kind === 'doc' && (
             <div className="export-group">
               <span className="export-title">
-                <FilePdf size={18} weight="fill" /> PDF
+                <FilePdf size={18} weight="fill" /> PDF on coloured paper
               </span>
-              <span className="export-hint">Pick a page colour</span>
+              <span className="export-hint">Made on the server; pick a page colour</span>
               <div className="export-swatches">
                 {PDF_BACKGROUNDS.map((bg) => (
                   <button

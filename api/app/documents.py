@@ -19,9 +19,9 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import delete, text
 from sqlmodel import Session, col, func, or_, select
 
-from app import assets, realtime
+from app import assets, offload, realtime
 from app.google import backup
-from app.merge import MergeResult, merge, with_ids
+from app.merge import MergeResult, merge, with_ids, with_row_ids
 from app.models import (
     EMPTY_CONTENT,
     DocKind,
@@ -54,6 +54,7 @@ class _Doc(BaseModel):
 class _Sheet(BaseModel):
     columns: list[str]
     rows: list[list[str | int | float | bool | None]] = []
+    row_ids: list[str] | None = None  # stable per row; filled in when missing
 
 
 class _Slide(BaseModel):
@@ -119,18 +120,35 @@ def validate_content(kind: DocKind, content: dict[str, Any]) -> dict[str, Any]:
     if kind is DocKind.sheet:
         width = len(data["columns"])
         data["rows"] = [(list(r) + [None] * width)[:width] for r in data["rows"]]
+        data["row_ids"] = with_row_ids(len(data["rows"]), data["row_ids"])
     if kind is DocKind.slides:
         slides = [_SlideWithId.model_validate(s).model_dump() for s in content.get("slides", [])]
         data["slides"] = with_ids(slides)
     return data
 
 
-def content_of(doc: Document) -> dict[str, Any]:
-    """Stored content, upgrading docs saved before the rich editor ({"markdown": ...})."""
-    content = doc.content or deepcopy(EMPTY_CONTENT[doc.kind])
-    if doc.kind is DocKind.doc and "html" not in content:
-        return validate_content(doc.kind, content)
+def _upgraded(kind: DocKind, content: dict[str, Any] | None) -> dict[str, Any]:
+    """Content in today's shape: docs saved before the rich editor ({"markdown": ...}) get html,
+    sheets saved before row ids get positional ones."""
+    content = content or deepcopy(EMPTY_CONTENT[kind])
+    if kind is DocKind.doc and "html" not in content:
+        return validate_content(kind, content)
+    if kind is DocKind.sheet and "row_ids" not in content:
+        return {**content, "row_ids": with_row_ids(len(content.get("rows", [])), None)}
     return content
+
+
+def content_of(doc: Document) -> dict[str, Any]:
+    """A document's full body, fetched from blob storage when it was offloaded."""
+    return _upgraded(doc.kind, offload.hydrate(doc.content, doc.s3_content_key))
+
+
+def _inherit_row_ids(content: dict[str, Any], source: dict[str, Any] | None) -> dict[str, Any]:
+    """A sheet sent without row ids (an agent's full rewrite, an older tab) takes the ids of the
+    version it was built on, row for row; rows past those get new ids."""
+    if content.get("row_ids") is not None or not source:
+        return content
+    return {**content, "row_ids": list(source.get("row_ids") or [])[: len(content.get("rows", []))]}
 
 
 # Postgres full-text vector over title + body; the migration builds a GIN index on exactly this
@@ -145,34 +163,51 @@ SNAPSHOTS_KEPT = 10
 
 
 def _apply_content(session: Session, doc: Document, content: dict[str, Any]) -> None:
-    doc.content = content
+    """Store a new body for the doc's current revision: inline, or offloaded when it is large."""
+    doc.content, doc.s3_content_key = offload.pack(doc.id, doc.revision, content)
     doc.search_text = extract_text(doc.kind, content)
     if doc.kind is DocKind.doc:
         assets.sync_references(session, doc.id, content.get("html", ""))
 
 
-def _snapshot(session: Session, doc: Document) -> None:
-    """Record the doc as of its current revision and drop ones older than SNAPSHOTS_KEPT."""
+def _snapshot(session: Session, doc: Document) -> set[str]:
+    """Record the doc as of its current revision and drop ones older than SNAPSHOTS_KEPT.
+    Returns blob keys nothing refers to any more, for the caller to delete after committing."""
     session.add(
         DocumentSnapshot(
             document_id=doc.id,
             revision=doc.revision,
             title=doc.title,
-            content_z=zlib.compress(json.dumps(doc.content or {}).encode()),
+            # An offloaded body is shared with the document row rather than copied.
+            content_z=b"" if doc.s3_content_key else zlib.compress(json.dumps(doc.content or {}).encode()),
+            s3_content_key=doc.s3_content_key,
         )
     )
-    session.execute(
-        delete(DocumentSnapshot).where(
-            col(DocumentSnapshot.document_id) == doc.id, col(DocumentSnapshot.revision) <= doc.revision - SNAPSHOTS_KEPT
-        )
+    old = col(DocumentSnapshot.document_id) == doc.id, col(DocumentSnapshot.revision) <= doc.revision - SNAPSHOTS_KEPT
+    dropped = set(session.exec(select(DocumentSnapshot.s3_content_key).where(*old, col(DocumentSnapshot.s3_content_key).is_not(None))).all())
+    session.execute(delete(DocumentSnapshot).where(*old))
+    if not dropped:
+        return set()
+    # A key carries over to later revisions while only the title changes; keep those.
+    kept = set(
+        session.exec(
+            select(DocumentSnapshot.s3_content_key).where(
+                DocumentSnapshot.document_id == doc.id, col(DocumentSnapshot.s3_content_key).in_(dropped)
+            )
+        ).all()
     )
+    return {k for k in dropped if k and k not in kept and k != doc.s3_content_key}
 
 
-def snapshot_at(session: Session, doc_id: str, revision: int) -> tuple[str, dict[str, Any]] | None:
-    snap = session.get(DocumentSnapshot, (doc_id, revision))
+def snapshot_at(session: Session, doc: Document, revision: int) -> tuple[str, dict[str, Any]] | None:
+    snap = session.get(DocumentSnapshot, (doc.id, revision))
     if snap is None:
         return None
-    return snap.title, json.loads(zlib.decompress(snap.content_z))
+    try:
+        body = offload.load(snap.s3_content_key) if snap.s3_content_key else json.loads(zlib.decompress(snap.content_z))
+    except LookupError:
+        return None  # its blob is gone: merge as if the base weren't kept
+    return snap.title, _upgraded(doc.kind, body)
 
 
 def _announce(doc: Document, kind: str) -> None:
@@ -268,7 +303,7 @@ def create_document(
     )
     session.add(doc)
     _apply_content(session, doc, data)
-    _snapshot(session, doc)
+    _snapshot(session, doc)  # the first snapshot: nothing to prune
     backup.mark_changed(session, doc)
     session.commit()
     session.refresh(doc)
@@ -289,10 +324,13 @@ def update_document(
     making it (None: the user in Chia). A change built on an older `base_revision` is merged
     three ways with what was saved since, never refused; the MergeResult says so."""
     merged: MergeResult | None = None
+    stale = base_revision is not None and base_revision < doc.revision
+    base = snapshot_at(session, doc, base_revision) if stale and base_revision is not None else None
     if content is not None:
+        if doc.kind is DocKind.sheet:
+            content = _inherit_row_ids(content, base[1] if base else content_of(doc))
         content = validate_content(doc.kind, content)
-    if base_revision is not None and base_revision < doc.revision:
-        base = snapshot_at(session, doc.id, base_revision)
+    if stale:
         base_title, base_content = base if base else (None, None)
         if content is not None:
             merged = merge(doc.kind, base_content, content_of(doc), content)
@@ -300,18 +338,19 @@ def update_document(
         if title is not None and base is not None and doc.title != base_title and title.strip() == base_title:
             title = None  # only the other side renamed it
         merged = merged or MergeResult(content={})
+    doc.revision += 1
     if content is not None:
         _apply_content(session, doc, content)
     if title is not None:
         doc.title = title.strip() or "Untitled"
-    doc.revision += 1
     doc.edited_by = edited_by
     doc.updated_at = utcnow()
     session.add(doc)
-    _snapshot(session, doc)
+    unused = _snapshot(session, doc)
     backup.mark_changed(session, doc)
     session.commit()
     session.refresh(doc)
+    offload.delete(unused)
     _announce(doc, "doc.updated")
     return doc, merged
 
@@ -322,6 +361,9 @@ def delete_document(session: Session, doc: Document) -> Callable[[], None]:
     for the caller to run after the response."""
     owner_id, file_id = doc.owner_id, doc.google_file_id
     keys = assets.release_document(session, doc.id)
+    bodies = {doc.s3_content_key} | set(
+        session.exec(select(DocumentSnapshot.s3_content_key).where(DocumentSnapshot.document_id == doc.id)).all()
+    )
     session.execute(delete(DocumentShare).where(col(DocumentShare.document_id) == doc.id))
     session.execute(delete(DocumentSnapshot).where(col(DocumentSnapshot.document_id) == doc.id))
     summary = DocumentSummary.of(doc)
@@ -334,6 +376,7 @@ def delete_document(session: Session, doc: Document) -> Callable[[], None]:
 
     def cleanup() -> None:
         assets.delete_blobs(keys)
+        offload.delete({k for k in bodies if k})
         if file_id:
             backup.trash_mirror(owner_id, file_id)
 
