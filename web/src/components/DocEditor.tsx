@@ -42,7 +42,8 @@ import { applyTheme } from '../lib/theme'
 import { scrollToPos } from '../lib/scroll'
 import DiagramDialog from './DiagramDialog'
 import DocOutline from './DocOutline'
-import { Float, Popover, Select, Tool, useTooltip, type Choice, type Tip } from './EditorUI'
+import { Float, Popover, Select, Tool, type Choice, type Tip } from './EditorUI'
+import { useTooltip } from './useTooltip'
 import { Diagram, ImageBlock, ImageInput, insertImages } from '../lib/mediaNodes'
 import { TableBar, TableInsert } from './TableTools'
 import { canMergeCells, ChiaTableCell, ChiaTableHeader, findTable } from '../lib/table'
@@ -512,9 +513,14 @@ export default function DocEditor({
   onChange,
   toolbarHost,
   sync = 0,
+  onTyping,
+  readOnly = false,
 }: {
   body: DocBody
   onChange: (b: DocBody) => void
+  /** Called on every keystroke, before `onChange` (which waits for a pause). */
+  onTyping?: () => void
+  readOnly?: boolean
   /** Element in the page's top bar that hosts the formatting toolbar. */
   toolbarHost: HTMLElement | null
   /** Changes when `body` was replaced from outside (an AI agent's edit), to show it. */
@@ -539,11 +545,11 @@ export default function DocEditor({
   // Node views and paste handlers are created once; they call through this.
   const media = useRef({ images: (_files: File[], _at?: number) => {}, editDiagram: (_pos: number, _code: string) => {} })
   const noticeTimer = useRef<number | undefined>(undefined)
-  const latest = useRef({ onChange, page })
+  const latest = useRef({ onChange, onTyping, page })
   const timer = useRef<number | undefined>(undefined)
 
   useEffect(() => {
-    latest.current = { onChange, page }
+    latest.current = { onChange, onTyping, page }
   })
 
   const editor = useEditor({
@@ -575,10 +581,12 @@ export default function DocEditor({
       }),
     ],
     content: body.html,
-    autofocus: linked ? false : 'end',
+    editable: !readOnly,
+    autofocus: linked || readOnly ? false : 'end',
     editorProps: { attributes: { class: 'doc-page', spellcheck: 'true' } },
     // Serialising on every keystroke is wasteful for long docs; batch it.
     onUpdate: ({ editor: e }) => {
+      latest.current.onTyping?.()
       window.clearTimeout(timer.current)
       timer.current = window.setTimeout(() => {
         if (e.isDestroyed) return // a node view finished work after this editor was replaced
@@ -721,22 +729,35 @@ export default function DocEditor({
     }
   }, [editor])
 
-  // An agent's version replaces the page. It goes into undo history, so Ctrl+Z brings back
-  // what was here; the cursor stays about where it was.
+  // A newer version (an agent's edit, or a merge of it with yours) replaces the page. It goes
+  // into undo history, so Ctrl+Z brings back what was here. The cursor keeps its place in the
+  // text: changes before it shift it along, changes after it leave it alone.
   const synced = useRef(sync)
   useEffect(() => {
     if (!editor || synced.current === sync) return
     synced.current = sync
     window.clearTimeout(timer.current) // a pending save of the old text would overwrite it
     const { from, to } = editor.state.selection
+    const before = editor.state.doc
     editor.commands.setContent(body.html, { emitUpdate: false })
-    const end = editor.state.doc.content.size
-    editor.commands.setTextSelection({ from: Math.min(from, end), to: Math.min(to, end) })
+    const after = editor.state.doc
+    const start = before.content.findDiffStart(after.content)
+    const diffEnd = before.content.findDiffEnd(after.content)
+    const map = (pos: number) => {
+      if (start === null || pos <= start) return Math.min(pos, after.content.size)
+      if (diffEnd && pos >= diffEnd.a) return Math.min(Math.max(0, pos + diffEnd.b - diffEnd.a), after.content.size)
+      return Math.min(pos, after.content.size)
+    }
+    editor.commands.setTextSelection({ from: map(from), to: map(to) })
     if (body.page !== page) {
       setPage(body.page)
       editor.chain().updatePageSize(PAGES[body.page].size).run()
     }
   }, [sync, editor, body, page])
+
+  useEffect(() => {
+    editor?.setEditable(!readOnly, false)
+  }, [editor, readOnly])
 
   const changePage = (p: PageSize) => {
     setPage(p)

@@ -55,7 +55,9 @@ def storage_key(asset_id: str) -> str:
 
 def store(session: Session, owner_id: int, data: bytes) -> Asset:
     """Save an image (deduplicated per owner) and return it."""
-    from app.documents import DocumentError  # app.documents imports this module indirectly
+    from app.documents import (
+        DocumentError,  # app.documents imports this module indirectly
+    )
 
     if len(data) > MAX_IMAGE:
         raise DocumentError(413, "Images can be up to 10 MB")

@@ -14,10 +14,10 @@ import csv
 import io
 import re
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from html import escape
-from collections.abc import Callable
 from pathlib import PurePath
 from typing import Any
 from urllib.parse import unquote
@@ -200,7 +200,7 @@ def _web_image(blob: bytes, content_type: str) -> bytes | None:
             out = io.BytesIO()
             img.convert("RGBA" if "A" in img.getbands() else "RGB").save(out, "PNG", optimize=True)
             return out.getvalue()
-    except Exception:
+    except Exception:  # noqa: BLE001  (any undecodable picture is simply left out)
         return None
 
 
@@ -246,7 +246,7 @@ def _docx(title: str, data: bytes, store_image: StoreImage | None) -> Result:
                 f'./w:abstractNum[@w:abstractNumId="{abstract_id}"]/w:lvl[@w:ilvl="{level}"]/w:numFmt/@w:val'
             )
             return fmt[0] if fmt else "bullet"
-        except Exception:
+        except Exception:  # noqa: BLE001  (odd numbering XML: guess from the style name)
             return "decimal" if "Number" in style_name else "bullet"
 
     def run_style(run: Any, heading: bool) -> _Style:
@@ -631,20 +631,19 @@ def fetch_public(editor: str, file_id: str) -> tuple[str, bytes]:
         "Google wouldn't share that file. Set its sharing to “Anyone with the link”, "
         "or connect Google and pick it from Drive.",
     )
-    with httpx.Client(follow_redirects=True, max_redirects=5, timeout=30) as client:
-        with client.stream("GET", url) as res:
-            host = res.url.host or ""
-            if not host.endswith(_GOOGLE_HOSTS):
-                raise DocumentError(502, "Google sent Chia somewhere unexpected")
-            if res.status_code in (401, 403, 404) or res.headers.get("content-type", "").startswith("text/html"):
-                raise private
-            if res.status_code >= 400:
-                raise DocumentError(502, f"Google returned an error ({res.status_code})")
-            chunks, size = [], 0
-            for chunk in res.iter_bytes():
-                size += len(chunk)
-                if size > MAX_UPLOAD:
-                    raise DocumentError(413, "That file is larger than 25 MB")
-                chunks.append(chunk)
-            name = _filename_from(res.headers.get("content-disposition", "")) or f"Untitled{ext}"
+    with httpx.Client(follow_redirects=True, max_redirects=5, timeout=30) as client, client.stream("GET", url) as res:
+        host = res.url.host or ""
+        if not host.endswith(_GOOGLE_HOSTS):
+            raise DocumentError(502, "Google sent Chia somewhere unexpected")
+        if res.status_code in (401, 403, 404) or res.headers.get("content-type", "").startswith("text/html"):
+            raise private
+        if res.status_code >= 400:
+            raise DocumentError(502, f"Google returned an error ({res.status_code})")
+        chunks, size = [], 0
+        for chunk in res.iter_bytes():
+            size += len(chunk)
+            if size > MAX_UPLOAD:
+                raise DocumentError(413, "That file is larger than 25 MB")
+            chunks.append(chunk)
+        name = _filename_from(res.headers.get("content-disposition", "")) or f"Untitled{ext}"
     return name, b"".join(chunks)

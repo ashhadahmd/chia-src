@@ -1,9 +1,16 @@
+import re
 from typing import Annotated
 from urllib.parse import quote
 
-import re
-
-from fastapi import APIRouter, BackgroundTasks, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Header,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlmodel import func, or_, select
@@ -17,9 +24,10 @@ from app.models import (
     ApiKey,
     DocKind,
     DocumentCreate,
-    DocumentShare,
     DocumentRead,
     DocumentRevision,
+    DocumentSaved,
+    DocumentShare,
     DocumentSummary,
     DocumentUpdate,
     PageSize,
@@ -32,10 +40,28 @@ from app.workspaces import Actor, check_doc_access, require_workspace_role
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.get("")
-def list_documents(session: SessionDep, actor: CurrentActor, kind: DocKind | None = None) -> list[DocumentSummary]:
-    """Documents in the current workspace (X-Workspace-Id, or your personal one)."""
-    return [DocumentSummary.of(d) for d in documents.list_documents(session, actor.workspace_id, kind)]
+@router.get("", response_model=list[DocumentSummary])
+def list_documents(
+    session: SessionDep,
+    actor: CurrentActor,
+    response: Response,
+    kind: DocKind | None = None,
+    include_shared: Annotated[bool, Query(description="Also list documents shared with you directly")] = False,
+    if_none_match: Annotated[str | None, Header()] = None,
+):
+    """Documents in the current workspace (X-Workspace-Id, or your personal one), newest first.
+    Send the last ETag as If-None-Match to get 304 when nothing changed."""
+    shared_with = actor.user_id if include_shared else None
+    etag = documents.list_etag(session, actor.workspace_id, shared_with) + (f";{kind}" if kind else "")
+    if if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+    docs = documents.list_documents(session, actor.workspace_id, kind)
+    if shared_with is not None:
+        mine = {d.id for d in docs}
+        docs += [d for d in documents.list_shared_with(session, shared_with) if d.id not in mine and (kind is None or d.kind == kind)]
+        docs.sort(key=lambda d: d.updated_at, reverse=True)
+    return [DocumentSummary.of(d) for d in docs]
 
 
 @router.get("/shared")
@@ -49,22 +75,40 @@ def create_document(body: DocumentCreate, session: SessionDep, actor: CurrentAct
     return documents.read_document(documents.create_document(session, actor, body.kind, body.title, body.content))
 
 
-@router.get("/{doc_id}")
-def get_document(doc_id: str, session: SessionDep, actor: CurrentActor) -> DocumentRead:
-    return documents.read_document(documents.get_document(session, actor, doc_id))
+@router.get("/{doc_id}", response_model=DocumentRead)
+def get_document(
+    doc_id: str,
+    session: SessionDep,
+    actor: CurrentActor,
+    response: Response,
+    if_none_match: Annotated[str | None, Header()] = None,
+):
+    """One document with its content. ETag is the revision: If-None-Match answers 304 when the
+    copy the browser has cached is current."""
+    doc = documents.get_document(session, actor, doc_id)
+    role = check_doc_access(session, actor, doc)
+    etag = f'W/"{doc.revision}-{role}"'
+    if if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+    return documents.read_document(doc).model_copy(update={"role": role})
 
 
 @router.patch("/{doc_id}")
-def update_document(doc_id: str, body: DocumentUpdate, session: SessionDep, actor: CurrentActor) -> DocumentSummary:
+def update_document(doc_id: str, body: DocumentUpdate, session: SessionDep, actor: CurrentActor) -> DocumentSaved:
+    """Save a change. One built on an older revision (an AI agent or teammate saved since) is
+    merged with theirs instead of refused; the reply then carries the merged content."""
     doc = documents.get_document(session, actor, doc_id, Role.editor)
-    return DocumentSummary.of(
-        documents.update_document(session, doc, body.title, body.content, base_revision=body.base_revision)
-    )
+    doc, merged = documents.update_document(session, doc, body.title, body.content, base_revision=body.base_revision)
+    saved = DocumentSaved(**DocumentSummary.of(doc).model_dump())
+    if merged is not None:
+        saved.merged, saved.conflicts, saved.content = True, merged.conflicts, documents.content_of(doc)
+    return saved
 
 
 @router.get("/{doc_id}/revision")
 def get_revision(doc_id: str, session: SessionDep, actor: CurrentActor) -> DocumentRevision:
-    """Cheap check an open editor polls to pick up changes made by AI agents."""
+    """Cheap check a tab makes when it comes back into view or reconnects."""
     doc = documents.get_document(session, actor, doc_id)
     return DocumentRevision(revision=doc.revision, edited_by=doc.edited_by, updated_at=doc.updated_at)
 
@@ -92,14 +136,26 @@ class ShareRead(BaseModel):
     id: int
     principal_type: PrincipalType
     principal_id: str
+    label: str  # the person's username or the agent key's name
     role: Role
+
+
+def _share_read(session: SessionDep, row: DocumentShare) -> ShareRead:
+    target = None
+    if row.principal_type is PrincipalType.user:
+        user = session.get(User, int(row.principal_id))
+        target = user.username if user else None
+    elif row.principal_type is PrincipalType.apikey:
+        key = session.get(ApiKey, int(row.principal_id))
+        target = key.name if key else None
+    return ShareRead(**row.model_dump(), label=target or "(removed)")
 
 
 @router.get("/{doc_id}/shares")
 def list_shares(doc_id: str, session: SessionDep, actor: CurrentActor) -> list[ShareRead]:
     doc = documents.get_document(session, actor, doc_id, Role.admin)
     rows = session.exec(select(DocumentShare).where(DocumentShare.document_id == doc.id)).all()
-    return [ShareRead(**r.model_dump()) for r in rows]
+    return [_share_read(session, r) for r in rows]
 
 
 @router.post("/{doc_id}/shares", status_code=status.HTTP_201_CREATED)
@@ -133,7 +189,7 @@ def share(doc_id: str, body: ShareCreate, session: SessionDep, actor: CurrentAct
     session.add(row)
     session.commit()
     session.refresh(row)
-    return ShareRead(**row.model_dump())
+    return _share_read(session, row)
 
 
 @router.delete("/{doc_id}/shares/{share_id}", status_code=status.HTTP_204_NO_CONTENT)

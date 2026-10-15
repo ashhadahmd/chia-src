@@ -1,7 +1,8 @@
 import { CaretDown, Check, type Icon } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Float } from './Float'
+import { useTooltip } from './useTooltip'
 
 export interface Tip {
   label: string
@@ -10,54 +11,7 @@ export interface Tip {
 }
 
 /* ───────────── Floating layer (tooltips, popovers) ───────────── */
-
-/** Renders into <body> so toolbar overflow never clips it. */
-export function Float({ children }: { children: ReactNode }) {
-  return createPortal(children, document.body)
-}
-
-export function useTooltip(tip: Tip | undefined) {
-  const [rect, setRect] = useState<DOMRect | null>(null)
-  const timer = useRef<number | undefined>(undefined)
-  useEffect(() => () => window.clearTimeout(timer.current), [])
-  const show = (el: HTMLElement) => {
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setRect(el.getBoundingClientRect()), 380)
-  }
-  const hide = () => {
-    window.clearTimeout(timer.current)
-    setRect(null)
-  }
-  const bind = {
-    onMouseEnter: (e: ReactMouseEvent<HTMLElement>) => show(e.currentTarget),
-    onMouseLeave: hide,
-    onFocus: (e: FocusEvent<HTMLElement>) => {
-      if (e.currentTarget.matches(':focus-visible')) show(e.currentTarget)
-    },
-    onBlur: hide,
-    onMouseDown: hide,
-  }
-  const node =
-    tip && rect ? (
-      <Float>
-        <motion.div
-          className="tooltip"
-          role="tooltip"
-          style={{ left: Math.max(90, Math.min(rect.left + rect.width / 2, window.innerWidth - 90)), top: rect.bottom + 8 }}
-          initial={{ opacity: 0, y: -3, x: '-50%' }}
-          animate={{ opacity: 1, y: 0, x: '-50%' }}
-          transition={{ duration: 0.14, ease: 'easeOut' }}
-        >
-          <span className="tooltip-head">
-            <span className="tooltip-label">{tip.label}</span>
-            {tip.keys && <kbd>{tip.keys}</kbd>}
-          </span>
-          {tip.hint && <span className="tooltip-hint">{tip.hint}</span>}
-        </motion.div>
-      </Float>
-    ) : null
-  return { bind, node }
-}
+export { Float } from './Float'
 
 export function Tool({ icon: I, tip, active, disabled, onClick }: { icon: Icon; tip: Tip; active?: boolean; disabled?: boolean; onClick: () => void }) {
   const { bind, node } = useTooltip(tip)

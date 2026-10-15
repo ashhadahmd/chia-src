@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.db import init_db
 from app.documents import DocumentError
 from app.mcp_server import mcp, mcp_app
-from app.routes import assets, auth, documents, google, keys, workspaces
+from app.routes import assets, auth, documents, google, keys, realtime, workspaces
 from app.worker import local_runner
 from app.workspaces import AccessError
 
@@ -43,6 +43,7 @@ api.include_router(auth.router)
 api.include_router(documents.router)
 api.include_router(google.router)
 api.include_router(keys.router)
+api.include_router(realtime.router)
 api.include_router(workspaces.router)
 app.include_router(api)
 

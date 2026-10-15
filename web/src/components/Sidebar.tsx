@@ -6,6 +6,7 @@ import AgentsCard from './AgentsCard'
 import Brand from './Brand'
 import DriveCard from './DriveCard'
 import ThemeSwitch from './ThemeSwitch'
+import WorkspaceSwitcher from './WorkspaceSwitcher'
 
 export default function Sidebar({ counts }: { counts: Record<Filter, number> }) {
   const [filter, setFilter] = useFilter()
@@ -14,6 +15,7 @@ export default function Sidebar({ counts }: { counts: Record<Filter, number> }) 
   return (
     <aside className="sidebar">
       <Brand />
+      <WorkspaceSwitcher />
       <nav className="nav" aria-label="Collections">
         {FILTERS.map(({ value, label, icon: Icon }) => {
           const active = filter === value

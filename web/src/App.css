@@ -395,7 +395,7 @@
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  z-index: 20;
+  z-index: 95; /* above dialogs, which hold menus too */
   width: 280px;
   padding: 6px;
   border-radius: var(--r-md);
@@ -891,8 +891,12 @@
   font-weight: 600;
   color: var(--muted);
 }
-.save-state[data-state='saved'] {
+.save-state[data-state='saved'],
+.save-state[data-state='synced'] {
   color: var(--sage);
+}
+.save-state[data-state='offline'] {
+  color: var(--ink-soft);
 }
 .save-state[data-state='remote'] {
   color: var(--terracotta);
@@ -2833,5 +2837,125 @@
   }
   .agents-body {
     padding: 0 16px 18px;
+  }
+}
+
+/* ───────────── Workspaces, sharing ───────────── */
+.sidebar > .workspace {
+  margin-top: -14px;
+  padding: 0 4px;
+}
+.workspace-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--r-xs);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+.workspace-new:hover {
+  background: var(--surface-hover);
+  color: var(--ink-soft);
+}
+.workspace-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px 7px 7px;
+  border-radius: var(--r-sm);
+  background: var(--surface-sunk);
+  color: var(--ink);
+  font-weight: 700;
+  text-align: left;
+}
+.workspace-trigger:hover,
+.workspace-trigger[aria-expanded='true'] {
+  background: var(--surface-hover);
+}
+.workspace-trigger svg {
+  color: var(--muted);
+}
+.workspace-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--sage-soft);
+  color: var(--sage);
+  font-family: var(--font-display);
+  font-size: 14px;
+}
+.workspace-mark[data-kind='personal'] {
+  background: var(--terracotta-soft);
+  color: var(--terracotta);
+}
+.workspace-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-rule {
+  margin: 4px 6px;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.select-label svg {
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+.small-dialog {
+  width: min(560px, 100%);
+}
+.people {
+  display: grid;
+  gap: 12px;
+}
+.people-invite {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.people-invite .input {
+  flex: 1;
+  min-width: 0;
+  height: 42px;
+}
+.people-list .avatar {
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+}
+.people-empty {
+  padding: 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.people-role {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--muted);
+}
+.agent-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+@media (max-width: 560px) {
+  .people-invite {
+    flex-wrap: wrap;
+  }
+  .people-invite .input {
+    flex-basis: 100%;
   }
 }

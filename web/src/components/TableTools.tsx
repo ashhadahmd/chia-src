@@ -15,7 +15,8 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useLayoutEffect, useState } from 'react'
 import { TOP_OFFSET } from '../lib/scroll'
 import { canMergeCells, findTable } from '../lib/table'
-import { Float, Popover, Tool, useTooltip } from './EditorUI'
+import { Float, Popover, Tool } from './EditorUI'
+import { useTooltip } from './useTooltip'
 
 const GRID = 8
 

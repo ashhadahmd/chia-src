@@ -6,7 +6,9 @@ what). Users who linked Google also get a backup mirror in their Drive: saves ma
 """
 
 import html as htmllib
+import json
 import re
+import zlib
 from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
@@ -15,16 +17,18 @@ from markdown_it import MarkdownIt
 from markdownify import MarkdownConverter
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import delete, text
-from sqlmodel import Session, col, or_, select
+from sqlmodel import Session, col, func, or_, select
 
-from app import assets
+from app import assets, realtime
 from app.google import backup
+from app.merge import MergeResult, merge, with_ids
 from app.models import (
     EMPTY_CONTENT,
     DocKind,
     Document,
     DocumentRead,
     DocumentShare,
+    DocumentSnapshot,
     DocumentSummary,
     PageSize,
     Role,
@@ -59,6 +63,10 @@ class _Slide(BaseModel):
 
 class _Slides(BaseModel):
     slides: list[_Slide]
+
+
+class _SlideWithId(_Slide):
+    id: str | None = None  # stable across edits, so concurrent edits merge slide by slide
 
 
 _SHAPES: dict[DocKind, type[BaseModel]] = {DocKind.doc: _Doc, DocKind.sheet: _Sheet, DocKind.slides: _Slides}
@@ -111,6 +119,9 @@ def validate_content(kind: DocKind, content: dict[str, Any]) -> dict[str, Any]:
     if kind is DocKind.sheet:
         width = len(data["columns"])
         data["rows"] = [(list(r) + [None] * width)[:width] for r in data["rows"]]
+    if kind is DocKind.slides:
+        slides = [_SlideWithId.model_validate(s).model_dump() for s in content.get("slides", [])]
+        data["slides"] = with_ids(slides)
     return data
 
 
@@ -128,11 +139,63 @@ TSVECTOR_SQL = "to_tsvector('simple'::regconfig, coalesce(document.title, '') ||
 SEARCH_LIMIT = 50
 
 
+# Revisions kept per document for three-way merges. A save built on an older revision than
+# this falls back to a merge that keeps everything both sides have.
+SNAPSHOTS_KEPT = 10
+
+
 def _apply_content(session: Session, doc: Document, content: dict[str, Any]) -> None:
     doc.content = content
     doc.search_text = extract_text(doc.kind, content)
     if doc.kind is DocKind.doc:
         assets.sync_references(session, doc.id, content.get("html", ""))
+
+
+def _snapshot(session: Session, doc: Document) -> None:
+    """Record the doc as of its current revision and drop ones older than SNAPSHOTS_KEPT."""
+    session.add(
+        DocumentSnapshot(
+            document_id=doc.id,
+            revision=doc.revision,
+            title=doc.title,
+            content_z=zlib.compress(json.dumps(doc.content or {}).encode()),
+        )
+    )
+    session.execute(
+        delete(DocumentSnapshot).where(
+            col(DocumentSnapshot.document_id) == doc.id, col(DocumentSnapshot.revision) <= doc.revision - SNAPSHOTS_KEPT
+        )
+    )
+
+
+def snapshot_at(session: Session, doc_id: str, revision: int) -> tuple[str, dict[str, Any]] | None:
+    snap = session.get(DocumentSnapshot, (doc_id, revision))
+    if snap is None:
+        return None
+    return snap.title, json.loads(zlib.decompress(snap.content_z))
+
+
+def _announce(doc: Document, kind: str) -> None:
+    """Tell open tabs about a committed change (see app.realtime)."""
+    summary = DocumentSummary.of(doc).model_dump(mode="json")
+    realtime.publish(
+        [realtime.workspace_channel(doc.workspace_id), realtime.doc_channel(doc.id)],
+        {"type": kind, "doc_id": doc.id, "workspace_id": doc.workspace_id, "revision": doc.revision, "edited_by": doc.edited_by, "doc": summary},
+    )
+
+
+def list_etag(session: Session, workspace_id: str, shared_with: int | None = None) -> str:
+    """A cheap fingerprint of a library listing (count, latest change, revision total), so a tab
+    coming back can ask "anything new?" and get 304 Not Modified when nothing is."""
+    stmt = select(func.count(), func.max(Document.updated_at), func.coalesce(func.sum(Document.revision), 0))
+    where = Document.workspace_id == workspace_id
+    if shared_with is not None:
+        shared = select(DocumentShare.document_id).where(
+            DocumentShare.principal_type == "user", DocumentShare.principal_id == str(shared_with)
+        )
+        where = or_(where, col(Document.id).in_(shared))
+    count, latest, revisions = session.exec(stmt.where(where)).one()
+    return f'W/"{count}-{latest.timestamp() if latest else 0}-{revisions}"'
 
 
 def list_documents(session: Session, workspace_id: str, kind: DocKind | None = None) -> list[Document]:
@@ -193,7 +256,7 @@ def create_document(
 ) -> Document:
     """Make a document in the actor's current workspace."""
     require_workspace_role(actor, Role.editor)
-    data = validate_content(kind, content) if content is not None else deepcopy(EMPTY_CONTENT[kind])
+    data = validate_content(kind, content if content is not None else deepcopy(EMPTY_CONTENT[kind]))
     doc = Document(
         kind=kind,
         title=title.strip() or "Untitled",
@@ -205,9 +268,11 @@ def create_document(
     )
     session.add(doc)
     _apply_content(session, doc, data)
+    _snapshot(session, doc)
     backup.mark_changed(session, doc)
     session.commit()
     session.refresh(doc)
+    _announce(doc, "doc.created")
     return doc
 
 
@@ -219,25 +284,36 @@ def update_document(
     *,
     edited_by: str | None = None,
     base_revision: int | None = None,
-) -> Document:
+) -> tuple[Document, MergeResult | None]:
     """Apply a change; the caller has checked editor access. `edited_by` names the AI agent
-    making it (None: the user in Chia). With `base_revision`, a doc that changed since that
-    revision is left alone (409)."""
-    if base_revision is not None and base_revision != doc.revision:
-        who = doc.edited_by or "another window"
-        raise DocumentError(409, f"{who} changed this document since it was opened")
+    making it (None: the user in Chia). A change built on an older `base_revision` is merged
+    three ways with what was saved since, never refused; the MergeResult says so."""
+    merged: MergeResult | None = None
     if content is not None:
-        _apply_content(session, doc, validate_content(doc.kind, content))
+        content = validate_content(doc.kind, content)
+    if base_revision is not None and base_revision < doc.revision:
+        base = snapshot_at(session, doc.id, base_revision)
+        base_title, base_content = base if base else (None, None)
+        if content is not None:
+            merged = merge(doc.kind, base_content, content_of(doc), content)
+            content = validate_content(doc.kind, merged.content)
+        if title is not None and base is not None and doc.title != base_title and title.strip() == base_title:
+            title = None  # only the other side renamed it
+        merged = merged or MergeResult(content={})
+    if content is not None:
+        _apply_content(session, doc, content)
     if title is not None:
         doc.title = title.strip() or "Untitled"
     doc.revision += 1
     doc.edited_by = edited_by
     doc.updated_at = utcnow()
     session.add(doc)
+    _snapshot(session, doc)
     backup.mark_changed(session, doc)
     session.commit()
     session.refresh(doc)
-    return doc
+    _announce(doc, "doc.updated")
+    return doc, merged
 
 
 def delete_document(session: Session, doc: Document) -> Callable[[], None]:
@@ -247,8 +323,14 @@ def delete_document(session: Session, doc: Document) -> Callable[[], None]:
     owner_id, file_id = doc.owner_id, doc.google_file_id
     keys = assets.release_document(session, doc.id)
     session.execute(delete(DocumentShare).where(col(DocumentShare.document_id) == doc.id))
+    session.execute(delete(DocumentSnapshot).where(col(DocumentSnapshot.document_id) == doc.id))
+    summary = DocumentSummary.of(doc)
     session.delete(doc)
     session.commit()
+    realtime.publish(
+        [realtime.workspace_channel(summary.workspace_id), realtime.doc_channel(summary.id)],
+        {"type": "doc.deleted", "doc_id": summary.id, "workspace_id": summary.workspace_id, "revision": summary.revision},
+    )
 
     def cleanup() -> None:
         assets.delete_blobs(keys)

@@ -1,6 +1,6 @@
 import { CheckCircle, CircleNotch, Leaf, ListBullets, MagnifyingGlass, SquaresFour, UploadSimple, WarningCircle, X } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { Link, useNavigate } from 'react-router'
 import DocCard, { DocRow } from '../components/DocCard'
 import { Select } from '../components/EditorUI'
@@ -9,6 +9,9 @@ import NewMenu from '../components/NewMenu'
 import Sidebar from '../components/Sidebar'
 import { useFilter, type Filter } from '../lib/filter'
 import { api, parseDate, type DocKind, type DocSummary, type GoogleStatus, type ImportResult } from '../lib/api'
+import { local } from '../lib/localStore'
+import { onChange, onResync } from '../lib/realtime'
+import { useWorkspaces } from '../lib/workspaces'
 import { pickFromDrive } from '../lib/picker'
 import { useAuth } from '../lib/useAuth'
 import { KINDS, softSpring } from '../lib/kinds'
@@ -117,13 +120,73 @@ function ImportToast({ task, onClose }: { task: ImportTask; onClose: () => void 
   )
 }
 
-const LIBRARY_POLL_MS = 5000
+/** The library for the current workspace: the copy on this device at once, then one conditional
+    request (304 when nothing changed); after that, changes arrive over the realtime feed. */
+function useLibrary() {
+  const { key, isPersonal } = useWorkspaces()
+  // Listings belong to a workspace; switching shows nothing until that one's list is in.
+  const [state, setState] = useState<{ key: string; docs: DocSummary[] | null }>({ key, docs: null })
+  const docs = state.key === key ? state.docs : null
+  const etag = useRef<string | null>(null)
+  const current = useRef(key)
+
+  /** Change the shown list for workspace `k` and keep the device copy in step (`tag` null:
+      changed locally or by an event, so the next reconcile fetches in full). */
+  const put = useCallback((k: string, fn: (d: DocSummary[] | null) => DocSummary[] | null, tag: string | null = null) => {
+    setState((prev) => {
+      const next = fn(prev.key === k ? prev.docs : null)
+      if (next) void local.putList(k, next, tag)
+      return { key: k, docs: next }
+    })
+    if (current.current === k) etag.current = tag
+  }, [])
+
+  const reconcile = useCallback(() => {
+    const k = current.current
+    api.listDocumentsIfChanged(etag.current, isPersonal).then(
+      (fresh) => {
+        if (fresh && current.current === k) put(k, () => fresh.data, fresh.etag)
+      },
+      () => put(k, (d) => d ?? [], etag.current), // offline with nothing cached: an empty library
+    )
+  }, [isPersonal, put])
+
+  useEffect(() => {
+    current.current = key
+    etag.current = null
+    let alive = true
+    void local.getList(key).then((cached) => {
+      if (!alive) return
+      if (cached) put(key, () => cached.docs, cached.etag)
+      reconcile()
+    })
+    return () => {
+      alive = false
+    }
+  }, [key, reconcile, put])
+
+  useEffect(
+    () =>
+      onChange((e) =>
+        put(current.current, (list) => {
+          if (!list) return list
+          const rest = list.filter((d) => d.id !== e.doc_id)
+          return e.type === 'doc.deleted' || !e.doc ? rest : [e.doc, ...rest]
+        }),
+      ),
+    [put],
+  )
+  useEffect(() => onResync(reconcile), [reconcile])
+
+  const update = useCallback((fn: (d: DocSummary[]) => DocSummary[]) => put(current.current, (d) => fn(d ?? [])), [put])
+  return { docs, update }
+}
 
 export default function Library() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [filter] = useFilter()
-  const [docs, setDocs] = useState<DocSummary[] | null>(null)
+  const { docs, update: setDocs } = useLibrary()
   const [query, setQuery] = useState('')
   const [google, setGoogle] = useState<GoogleStatus | null>(null)
   const [task, setTask] = useState<ImportTask | null>(null)
@@ -134,22 +197,8 @@ export default function Library() {
   const dismiss = useRef<number | undefined>(undefined)
 
   useEffect(() => {
-    api.listDocuments().then(setDocs, () => setDocs([]))
     api.googleStatus().then(setGoogle, () => setGoogle(null))
     return () => window.clearTimeout(dismiss.current)
-  }, [])
-
-  // AI agents add documents from outside; show them as they arrive.
-  useEffect(() => {
-    const refresh = () => {
-      if (!document.hidden) api.listDocuments().then(setDocs, () => undefined)
-    }
-    const timer = window.setInterval(refresh, LIBRARY_POLL_MS)
-    document.addEventListener('visibilitychange', refresh)
-    return () => {
-      window.clearInterval(timer)
-      document.removeEventListener('visibilitychange', refresh)
-    }
   }, [])
 
   /** Runs import jobs one by one; opens the document when exactly one came in cleanly. */
@@ -170,7 +219,7 @@ export default function Library() {
         details.push(jobs.length > 1 ? `${job.name}: ${message}` : message)
       }
     }
-    if (made.length) setDocs((d) => [...made, ...(d ?? []).filter((x) => !made.some((m) => m.id === x.id))])
+    if (made.length) setDocs((d) => [...made, ...d.filter((x) => !made.some((m) => m.id === x.id))])
     if (made.length === 1 && !failed && !details.length) {
       setTask(null)
       navigate(`/d/${made[0].id}`)
@@ -260,7 +309,8 @@ export default function Library() {
   async function remove(doc: DocSummary) {
     if (!window.confirm(`Delete “${doc.title}”? This cannot be undone.`)) return
     await api.deleteDocument(doc.id)
-    setDocs((d) => (d ?? []).filter((x) => x.id !== doc.id))
+    void local.deleteDoc(doc.id)
+    setDocs((d) => d.filter((x) => x.id !== doc.id))
   }
 
   async function create(kind: DocKind) {

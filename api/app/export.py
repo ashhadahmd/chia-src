@@ -163,14 +163,14 @@ _DPI = 96
 class _Node:
     tag: str
     attrs: dict[str, str] = field(default_factory=dict)
-    children: list["_Node | str"] = field(default_factory=list)
+    children: list[_Node | str] = field(default_factory=list)
 
     @property
     def style(self) -> dict[str, str]:
         raw = self.attrs.get("style") or ""
         return {k.strip().lower(): v.strip() for k, v in (d.split(":", 1) for d in raw.split(";") if ":" in d)}
 
-    def elements(self, *tags: str) -> list["_Node"]:
+    def elements(self, *tags: str) -> list[_Node]:
         return [c for c in self.children if isinstance(c, _Node) and (not tags or c.tag in tags)]
 
     def text(self) -> str:

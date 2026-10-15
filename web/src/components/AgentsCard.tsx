@@ -2,7 +2,8 @@ import { Check, Copy, Plugs, Robot, Terminal, X } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useState } from 'react'
 import { api, MCP_URL, timeAgo, type AgentKey } from '../lib/api'
-import { Float } from './EditorUI'
+import { useWorkspaces } from '../lib/workspaces'
+import { Float, Select } from './EditorUI'
 
 type Shell = 'bash' | 'zsh' | 'fish'
 
@@ -90,6 +91,16 @@ function AgentsDialog({ keys, onKeys, onClose }: { keys: AgentKey[]; onKeys: (k:
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [shell, setShell] = useState<Shell>(() => (navigator.userAgent.includes('Mac') ? 'zsh' : 'bash'))
+  // What new keys may reach: any of your workspaces (personal by default) or one team only,
+  // with full editing or read-only access.
+  const { list: workspaces } = useWorkspaces()
+  const [lock, setLock] = useState<string>('')
+  const [role, setRole] = useState<'editor' | 'viewer'>('editor')
+  const teams = workspaces?.filter((w) => w.kind !== 'personal') ?? []
+  const scopeOf = (k: AgentKey) =>
+    [k.workspace_id && `${workspaces?.find((w) => w.id === k.workspace_id)?.name ?? 'one workspace'} only`, k.role === 'viewer' && 'read-only']
+      .filter(Boolean)
+      .join(' · ')
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -105,7 +116,7 @@ function AgentsDialog({ keys, onKeys, onClose }: { keys: AgentKey[]; onKeys: (k:
     try {
       // One key per agent: a new one replaces the old, which stops working.
       for (const k of keys.filter((k) => k.name === client.name)) await api.revokeKey(k.id)
-      const made = await api.createKey(client.name)
+      const made = await api.createKey(client.name, { workspace_id: lock || null, role })
       setFresh((f) => ({ ...f, [client.name]: made.key }))
       await reload()
     } catch (err) {
@@ -159,6 +170,28 @@ function AgentsDialog({ keys, onKeys, onClose }: { keys: AgentKey[]; onKeys: (k:
             </button>
           </header>
           <div className="agents-body">
+            <div className="agent-scope">
+              <span>New keys can reach</span>
+              {teams.length > 0 && (
+                <Select
+                  label="Workspace"
+                  tip={{ label: 'Workspace', hint: 'Lock the agent to one team workspace' }}
+                  value={lock}
+                  choices={[{ value: '', label: 'All my workspaces', hint: 'Personal by default' }, ...teams.map((w) => ({ value: w.id, label: `${w.name} only` }))]}
+                  onChange={setLock}
+                />
+              )}
+              <Select
+                label="Access"
+                tip={{ label: 'Access', hint: 'Read-only agents can look but not change anything' }}
+                value={role}
+                choices={[
+                  { value: 'editor', label: 'Can edit' },
+                  { value: 'viewer', label: 'Read-only' },
+                ]}
+                onChange={setRole}
+              />
+            </div>
             <ul className="agents-list">
               {CLIENTS.map((client) => {
                 const key = keys.find((k) => k.name === client.name)
@@ -175,6 +208,7 @@ function AgentsDialog({ keys, onKeys, onClose }: { keys: AgentKey[]; onKeys: (k:
                           {key ? (
                             <>
                               <Check size={12} weight="bold" /> {key.last_used_at ? `Connected · last used ${timeAgo(key.last_used_at)}` : 'Key made · waiting for its first call'}
+                              {scopeOf(key) && ` · ${scopeOf(key)}`}
                             </>
                           ) : (
                             client.covers

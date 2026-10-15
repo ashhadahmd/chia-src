@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 from secrets import token_urlsafe
+from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Enum, Index, Text, UniqueConstraint, text
+from sqlalchemy import Enum, Index, LargeBinary, Text, UniqueConstraint, text
 from sqlmodel import JSON, Column, Field, SQLModel
 
 
@@ -183,6 +183,17 @@ class Document(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class DocumentSnapshot(SQLModel, table=True):
+    """Content as of one revision, kept for the last few revisions of each document so a save
+    built on an older revision can be merged three ways (see app.merge). zlib-compressed JSON."""
+
+    document_id: str = Field(foreign_key="document.id", primary_key=True)
+    revision: int = Field(primary_key=True)
+    title: str
+    content_z: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class DocumentShare(SQLModel, table=True):
     """A grant on one document outside its workspace: a friend or client (user), one AI agent
     (apikey), or anyone holding a link (public_link, principal_id is the link token)."""
@@ -242,13 +253,14 @@ class DocumentSummary(SQLModel):
     updated_at: datetime
 
     @classmethod
-    def of(cls, doc: Document) -> "DocumentSummary":
+    def of(cls, doc: Document) -> DocumentSummary:
         url = GOOGLE_URLS[doc.kind].format(doc.google_file_id) if doc.google_file_id else None
         return cls(**doc.model_dump(exclude={"content", "search_text"}), drive_url=url)
 
 
 class DocumentRead(DocumentSummary):
     content: dict[str, Any]
+    role: Role | None = None  # the reader's role on this document (REST reads fill it in)
 
 
 class DocumentCreate(SQLModel):
@@ -261,6 +273,15 @@ class DocumentUpdate(SQLModel):
     title: str | None = None
     content: dict[str, Any] | None = None
     base_revision: int | None = None  # refuse the change if the doc moved on since this revision
+
+
+class DocumentSaved(DocumentSummary):
+    """A save's result. `merged`: the save was built on an older revision and was combined with
+    the changes made since; `content` is then the combined version for the editor to adopt."""
+
+    merged: bool = False
+    conflicts: list[str] = []
+    content: dict[str, Any] | None = None
 
 
 class DocumentRevision(SQLModel):

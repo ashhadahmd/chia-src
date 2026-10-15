@@ -107,7 +107,7 @@ def callback(session: SessionDep, state: str = "", code: str = "", error: str = 
         user, pending_login = oauth.finish(session, code, state)
     except (ValueError, oauth.GoogleNotConfigured) as exc:
         return _to_frontend("/auth/google", fragment={"error": str(exc)})
-    except Exception:
+    except Exception:  # noqa: BLE001  (a browser redirect must land somewhere readable)
         return _to_frontend("/auth/google", fragment={"error": "Could not complete Google sign-in, try again"})
 
     assert user.id is not None

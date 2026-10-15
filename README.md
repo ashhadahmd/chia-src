@@ -73,13 +73,21 @@ Use **AI agents** in the sidebar. Pick an agent, press **Connect**, and run the 
 Any other streamable-HTTP client: URL `http://localhost:8000/mcp`, header `Authorization: Bearer <key>`, plus `X-Workspace-Id: <id>` to work in a team workspace (the personal workspace otherwise). Keys can also be issued with `POST /api/keys {"name": "..."}`; add `"workspace_id"` to lock the agent to one workspace and `"role": "viewer"` to make it read-only. `MCP_API_KEY` in `.env` is a bootstrap key for the root user; its edits show as "AI agent".
 
 Tools:
-- Read-only: `list_documents`, `search_documents` (title and text), `get_document` (docs as markdown, or `format="html"` to keep styling).
-- Write: `create_doc` (markdown), `create_sheet`, `create_slides`, and `append_to_doc`, which adds markdown to the end and leaves existing content untouched.
+- Read-only: `list_workspaces`, `list_documents`, `search_documents` (title and text), `get_document` (docs as markdown, or `format="html"` to keep styling).
+- Write: `create_doc` (markdown), `create_sheet`, `create_slides`, and small edits that leave everything else untouched: `patch_doc` (append, prepend, or replace the section under one heading), `update_sheet_cells` (set cells by row and column name or letter, append rows), `update_slide` (add, edit or move one slide), and `append_to_doc`.
 - Replace: `update_document`, which overwrites a document's title or content.
+
+`list_documents`, `search_documents` and the `create_*` tools take an optional `workspace_id`.
 
 Results include `chia_url`, which opens the document in Chia, and `drive_url` once the document has a Drive backup. Tools carry read-only and destructive hints, so clients can decide which calls need approval.
 
-**Live edits.** An open document checks for agent changes every 2.5 s and shows them with "Updated by <agent>". Saves carry the revision they build on. If an agent changed the doc while you were typing, your save is refused (409) and the agent's version loads. Ctrl+Z brings back what you had. Library cards name the agent that last changed or created a document.
+**Live edits.** Nothing polls. Open tabs keep one WebSocket (`/api/ws`) that pushes a small notice whenever someone, or an agent, creates, changes or deletes a document in the workspace or the open document. A hidden tab closes it, and a tab that comes back checks once with an ETag (`If-None-Match`, usually answered 304). Library cards name the agent that last changed or created a document.
+
+**Saving and merging.** Edits land in the browser's IndexedDB at once ("Saved locally"), then go to the server ("Synced"). Offline edits wait in the same place ("Offline · saved on this device") and go out when the network returns, even after a reload. Each save carries the revision it builds on. When an agent saved in between, the server merges the two three ways instead of refusing: docs paragraph by paragraph, sheets cell by cell, slides slide by slide (each slide has a stable `id`). A part both sides changed keeps both versions. The server keeps the last 10 revisions of each document for this; an older save still merges, keeping everything from both sides.
+
+## Tests
+
+`cd api && uv run pytest` runs the end-to-end suite (HTTP API, MCP, WebSocket) on a throwaway SQLite database; set `TEST_DATABASE_URL` to an empty Postgres database to run it there.
 
 ## Content shapes
 
@@ -87,4 +95,4 @@ Results include `chia_url`, which opens the document in Chia, and `drive_url` on
 | --- | --- |
 | doc | `{ "html": "...", "page": "letter" \| "a4" }`. MCP clients may send `{ "markdown": "..." }` instead; pipe tables and ```` ```mermaid ```` blocks are supported. |
 | sheet | `{ "columns": [...], "rows": [[...]] }`. A value starting with `=` becomes a formula in Google Sheets. |
-| slides | `{ "slides": [{ "title", "body" }] }`. Body lines starting with `- ` become bullets in Google Slides. |
+| slides | `{ "slides": [{ "id", "title", "body" }] }`. `id` is optional on input and kept stable afterwards. Body lines starting with `- ` become bullets in Google Slides. |

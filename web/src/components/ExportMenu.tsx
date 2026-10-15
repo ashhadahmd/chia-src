@@ -2,7 +2,8 @@ import { CaretDown, DownloadSimple, FileDoc, FilePdf, FilePpt, FileXls, type Ico
 import { useState } from 'react'
 import type { DocKind, ExportFormat } from '../lib/api'
 import { GoogleAppIcon } from './BrandIcons'
-import { Popover, useTooltip } from './EditorUI'
+import { Popover } from './EditorUI'
+import { useTooltip } from './useTooltip'
 import GoogleMark from './GoogleMark'
 
 const PDF_BACKGROUNDS = [

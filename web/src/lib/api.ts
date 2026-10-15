@@ -15,6 +15,8 @@ export interface SheetBody {
   rows: Cell[][]
 }
 export interface Slide {
+  /** Stable across edits, so concurrent edits merge slide by slide. */
+  id?: string
   title: string
   body: string
 }
@@ -58,11 +60,35 @@ export interface Workspace {
 }
 
 export type Doc = DocSummary &
-  (
+  /** Your role on this document (owner/admin can share it; viewers can't edit). */
+  { role?: Role | null } & (
     | { kind: 'doc'; content: DocBody }
     | { kind: 'sheet'; content: SheetBody }
     | { kind: 'slides'; content: SlidesBody }
   )
+
+/** A save's result. `merged`: someone (often an AI agent) saved since the revision this edit
+    was built on, and the server combined both; `content` is then the combined version. */
+export interface DocSaved extends DocSummary {
+  merged: boolean
+  conflicts: string[]
+  content: Doc['content'] | null
+}
+
+export interface Member {
+  user_id: number
+  username: string
+  email: string
+  role: Role
+}
+
+export interface Share {
+  id: number
+  principal_type: 'user' | 'apikey' | 'public_link'
+  principal_id: string
+  label: string
+  role: Role
+}
 
 export interface User {
   id: number
@@ -88,6 +114,9 @@ export interface AgentKey {
   created_at: string
   last_used_at: string | null
 }
+
+/** Thrown when the request never reached the server (offline, server down). */
+export class NetworkError extends Error {}
 
 export class ApiError extends Error {
   status: number
@@ -150,13 +179,35 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !(init.body instanceof URLSearchParams) && !(init.body instanceof FormData))
     headers.set('Content-Type', 'application/json')
 
-  const res = await fetch(`${BASE_URL}${path}`, { ...init, headers })
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, { ...init, headers })
+  } catch {
+    throw new NetworkError('Chia is unreachable')
+  }
   if (res.status === 401 && token) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+  if (!res.ok && res.status !== 304) {
+    const detail = await res.json().then((b) => b.detail, () => res.statusText)
+    throw new ApiError(res.status, typeof detail === 'string' ? detail : 'Request failed')
+  }
+  return res.status === 204 || res.status === 304 ? (undefined as T) : res.json()
+}
+
+/** GET with If-None-Match: `null` when the copy behind `etag` is still current (304). */
+async function conditional<T>(path: string, etag: string | null): Promise<{ data: T; etag: string | null } | null> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders(etag ? { 'If-None-Match': etag } : undefined) })
+  } catch {
+    throw new NetworkError('Chia is unreachable')
+  }
+  if (res.status === 304) return null
+  if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
   if (!res.ok) {
     const detail = await res.json().then((b) => b.detail, () => res.statusText)
     throw new ApiError(res.status, typeof detail === 'string' ? detail : 'Request failed')
   }
-  return res.status === 204 ? (undefined as T) : res.json()
+  return { data: (await res.json()) as T, etag: res.headers.get('ETag') }
 }
 
 export interface GoogleStatus {
@@ -215,11 +266,15 @@ export const api = {
     }),
   me: () => request<User>('/api/auth/me'),
   listDocuments: () => request<DocSummary[]>('/api/documents'),
+  /** The library, or null when `etag` is still current. Personal workspaces include docs shared with you. */
+  listDocumentsIfChanged: (etag: string | null, includeShared: boolean) =>
+    conditional<DocSummary[]>(`/api/documents${includeShared ? '?include_shared=true' : ''}`, etag),
   getDocument: (id: string) => request<Doc>(`/api/documents/${id}`),
+  getDocumentIfChanged: (id: string, etag: string | null) => conditional<Doc>(`/api/documents/${id}`, etag),
   createDocument: (kind: DocKind, title = 'Untitled') =>
     request<Doc>('/api/documents', { method: 'POST', body: JSON.stringify({ kind, title }) }),
   updateDocument: (id: string, patch: { title?: string; content?: Doc['content']; base_revision?: number }) =>
-    request<DocSummary>(`/api/documents/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    request<DocSaved>(`/api/documents/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   getRevision: (id: string) => request<DocRevision>(`/api/documents/${id}/revision`),
   deleteDocument: (id: string) => request<void>(`/api/documents/${id}`, { method: 'DELETE' }),
   exportFile: (id: string, format: ExportFormat, title: string, background?: string) =>
@@ -246,10 +301,23 @@ export const api = {
   googleConnect: () => request<{ auth_url: string }>('/api/google/connect', { method: 'POST' }),
   googleDisconnect: () => request<void>('/api/google', { method: 'DELETE' }),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
+  createWorkspace: (name: string) => request<Workspace>('/api/workspaces', { method: 'POST', body: JSON.stringify({ name, kind: 'team' }) }),
+  listMembers: (workspace: string) => request<Member[]>(`/api/workspaces/${workspace}/members`),
+  setMember: (workspace: string, user: string, role: Role) =>
+    request<Member>(`/api/workspaces/${workspace}/members`, { method: 'PUT', body: JSON.stringify({ user, role }) }),
+  removeMember: (workspace: string, userId: number) => request<void>(`/api/workspaces/${workspace}/members/${userId}`, { method: 'DELETE' }),
+  listShares: (id: string) => request<Share[]>(`/api/documents/${id}/shares`),
+  share: (id: string, principal: string, role: Role) =>
+    request<Share>(`/api/documents/${id}/shares`, { method: 'POST', body: JSON.stringify({ principal, role }) }),
+  unshare: (id: string, shareId: number) => request<void>(`/api/documents/${id}/shares/${shareId}`, { method: 'DELETE' }),
   listKeys: () => request<AgentKey[]>('/api/keys'),
-  createKey: (name: string) => request<AgentKey & { key: string }>('/api/keys', { method: 'POST', body: JSON.stringify({ name }) }),
+  createKey: (name: string, scope: { workspace_id?: string | null; role?: 'editor' | 'viewer' } = {}) =>
+    request<AgentKey & { key: string }>('/api/keys', { method: 'POST', body: JSON.stringify({ name, ...scope }) }),
   revokeKey: (id: number) => request<void>(`/api/keys/${id}`, { method: 'DELETE' }),
 }
+
+/** The realtime change feed (see lib/realtime.ts). */
+export const WS_URL = `${BASE_URL.replace(/^http/, 'ws')}/api/ws`
 
 /** Where AI agents connect (streamable HTTP MCP). */
 export const MCP_URL = `${BASE_URL}/mcp`

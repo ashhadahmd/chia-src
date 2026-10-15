@@ -21,8 +21,8 @@ from datetime import timedelta
 from sqlalchemy import case, update
 from sqlmodel import Session, and_, col, or_, select
 
-from app.db import engine
 from app import assets
+from app.db import engine
 from app.export import resolve_colors
 from app.google import oauth, workspace
 from app.models import DocKind, Document, DriveSyncStatus, GoogleAccount, utcnow
