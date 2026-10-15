@@ -1,16 +1,25 @@
+import logging
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends
-from sqlalchemy import inspect, text
-from sqlmodel import Session, SQLModel, create_engine, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, create_engine, or_, select
 
 from app.config import get_settings
 from app.models import User
 from app.security import hash_password
 
 settings = get_settings()
-engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
+_sqlite = settings.database_url.startswith("sqlite")
+engine = create_engine(
+    settings.database_url,
+    connect_args={"check_same_thread": False} if _sqlite else {},
+    pool_pre_ping=not _sqlite,  # Lambda containers thaw with connections the server already closed
+)
+
+API_DIR = Path(__file__).resolve().parent.parent
 
 
 def get_session() -> Iterator[Session]:
@@ -20,49 +29,46 @@ def get_session() -> Iterator[Session]:
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
-# Columns added after the first release; create_all() never alters existing tables.
-_ADDED_COLUMNS = {
-    "document": {
-        "google_file_id": "VARCHAR",
-        "backed_up_at": "DATETIME",
-        "backup_error": "VARCHAR",
-    },
-    "googleaccount": {"backup_folder_id": "VARCHAR"},
-}
 
+def migrate() -> None:
+    """Bring the schema to the latest Alembic revision (same as `alembic upgrade head`)."""
+    logging.getLogger("alembic.runtime.plugins").setLevel(logging.WARNING)  # import-time chatter
+    from alembic import command
+    from alembic.config import Config
 
-def _add_missing_columns() -> None:
-    inspector = inspect(engine)
-    with engine.begin() as conn:
-        for table, columns in _ADDED_COLUMNS.items():
-            if not inspector.has_table(table):
-                continue
-            existing = {c["name"] for c in inspector.get_columns(table)}
-            for name, ddl in columns.items():
-                if name not in existing:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+    config = Config(str(API_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(API_DIR / "migrations"))
+    config.attributes["configure_logging"] = False  # keep the server's logging as it is
+    command.upgrade(config, "head")
 
 
 def init_db() -> None:
-    _add_missing_columns()
-    # Pending OAuth handshakes are short-lived; rebuilding the table keeps its schema current.
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS oauthstate"))
-    SQLModel.metadata.create_all(engine)
+    """Startup: migrate when AUTO_MIGRATE is on, then make sure the root account exists.
+    Safe when several instances start at once."""
+    from app.workspaces import personal_workspace
+
+    if settings.auto_migrate:
+        migrate()
     with Session(engine) as session:
-        existing = session.exec(
+        root = session.exec(
             select(User).where(or_(User.email == settings.root_email, User.username == settings.root_username))
         ).first()
-        if existing is None:
-            session.add(
-                User(
-                    email=settings.root_email,
-                    username=settings.root_username,
-                    hashed_password=hash_password(settings.root_password),
-                    is_root=True,
-                )
+        if root is None:
+            root = User(
+                email=settings.root_email,
+                username=settings.root_username,
+                hashed_password=hash_password(settings.root_password),
+                is_root=True,
             )
-            session.commit()
+            session.add(root)
+            try:
+                session.commit()
+            except IntegrityError:  # another instance seeded it first
+                session.rollback()
+                return
+            session.refresh(root)
+        assert root.id is not None
+        personal_workspace(session, root.id, root.username)
 
 
 def get_root_user(session: Session) -> User:

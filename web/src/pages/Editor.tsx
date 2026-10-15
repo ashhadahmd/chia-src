@@ -4,38 +4,62 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import DocEditor from '../components/DocEditor'
 import ExportMenu, { type DocActions } from '../components/ExportMenu'
-import { api, type Cell, type Doc, type GoogleStatus, type SheetBody, type SlidesBody } from '../lib/api'
+import { api, ApiError, type Cell, type Doc, type DocSummary, type GoogleStatus, type SheetBody, type SlidesBody } from '../lib/api'
 import { KINDS, softSpring } from '../lib/kinds'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 const SAVED_SHOWN_MS = 2500 // "Saved" stays this long, then the status line folds away
 
-/** Debounced autosave: batches title/content edits and PATCHes after a pause. */
-function useAutosave(id: string | undefined, onSaved: () => void) {
+/** Debounced autosave: batches title/content edits and PATCHes after a pause. Saves run one at a
+    time, each sent with the revision it builds on, so one that would overwrite a change an AI
+    agent made meanwhile is refused (409) and `onConflict` pulls that change in instead. */
+function useAutosave(id: string | undefined, onSaved: (saved: DocSummary) => void, onConflict: () => void) {
   const [state, setState] = useState<SaveState>('idle')
+  const revision = useRef(0) // of the stored version what's on screen builds on
   const pending = useRef<{ title?: string; content?: Doc['content'] }>({})
   const timer = useRef<number | undefined>(undefined)
   const hide = useRef<number | undefined>(undefined)
+  const chain = useRef<Promise<void>>(Promise.resolve())
+  const sending = useRef(false)
+  const latest = useRef({ onSaved, onConflict })
+  useEffect(() => {
+    latest.current = { onSaved, onConflict }
+  })
 
-  const flush = useCallback(async () => {
-    window.clearTimeout(timer.current)
+  const send = useCallback(async () => {
     if (!id || Object.keys(pending.current).length === 0) return
     const patch = pending.current
     pending.current = {}
     setState('saving')
+    sending.current = true
     try {
-      await api.updateDocument(id, patch)
+      const saved = await api.updateDocument(id, { ...patch, base_revision: revision.current })
+      revision.current = saved.revision
       // Edits made while this request ran are already queued and keep showing "Saving".
       if (Object.keys(pending.current).length === 0) {
         setState('saved')
         hide.current = window.setTimeout(() => setState('idle'), SAVED_SHOWN_MS)
       }
-      onSaved()
-    } catch {
-      setState('error')
+      latest.current.onSaved(saved)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Queued edits build on the same stale copy; the agent's version replaces them.
+        pending.current = {}
+        window.clearTimeout(timer.current)
+        setState('idle')
+        latest.current.onConflict()
+      } else setState('error')
+    } finally {
+      sending.current = false
     }
-  }, [id, onSaved])
+  }, [id])
+
+  const flush = useCallback(() => {
+    window.clearTimeout(timer.current)
+    chain.current = chain.current.then(send)
+    return chain.current
+  }, [send])
 
   const queue = useCallback(
     (patch: { title?: string; content?: Doc['content'] }) => {
@@ -48,10 +72,26 @@ function useAutosave(id: string | undefined, onSaved: () => void) {
     [flush],
   )
 
+  /** Drop unsaved edits (a newer version from an agent is replacing them). */
+  const discard = useCallback(() => {
+    pending.current = {}
+    window.clearTimeout(timer.current)
+    setState((s) => (s === 'saving' && !sending.current ? 'idle' : s))
+  }, [])
+
+  const busy = useCallback(() => sending.current, [])
+  const known = useCallback(() => revision.current, [])
+  /** A stored version is now on screen. */
+  const track = useCallback((rev: number) => {
+    revision.current = rev
+  }, [])
   useEffect(() => () => void flush(), [flush])
   useEffect(() => () => window.clearTimeout(hide.current), [])
-  return { state, queue, flush }
+  return { state, queue, flush, discard, busy, known, track }
 }
+
+const POLL_MS = 2500 // how often an open doc checks for AI agents' changes
+const REMOTE_SHOWN_MS = 5000
 
 const SAVE_LABELS = {
   saving: { icon: <CircleNotch size={14} className="spin" />, text: 'Saving…' },
@@ -211,6 +251,14 @@ export default function Editor() {
   const [google, setGoogle] = useState<GoogleStatus | null>(null)
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null)
 
+  // Bumped when a newer version from elsewhere replaces what's on screen, so the doc editor reloads.
+  const [sync, setSync] = useState(0)
+  // "Updated by Codex": shown briefly after an agent's change arrives.
+  const [remote, setRemote] = useState<{ by: string; conflict: boolean } | null>(null)
+  const remoteTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(remoteTimer.current), [])
+
+
   // Backups run a few seconds after a save; refresh the Drive badge once they likely landed.
   const refreshMeta = useCallback(() => {
     if (!id) return
@@ -218,12 +266,60 @@ export default function Editor() {
       api.getDocument(id).then((d) => setDoc((cur) => (cur ? { ...cur, drive_url: d.drive_url, backup_error: d.backup_error, backed_up_at: d.backed_up_at } : cur)), () => {})
     }, 6000)
   }, [id])
-  const { state, queue, flush } = useAutosave(id, google?.connected ? refreshMeta : noop)
+  const onSaved = useCallback(
+    (saved: DocSummary) => {
+      setDoc((cur) => (cur ? { ...cur, revision: saved.revision, edited_by: saved.edited_by, updated_at: saved.updated_at } : cur))
+      if (google?.connected) refreshMeta()
+    },
+    [google?.connected, refreshMeta],
+  )
+  const pull = useRef<(conflict: boolean) => void>(noop)
+  const { state, queue, flush, discard, busy, known, track } = useAutosave(id, onSaved, () => pull.current(true))
+  const load = useCallback(
+    (d: Doc) => {
+      track(d.revision)
+      setDoc(d)
+    },
+    [track],
+  )
+
+  // Replace what's on screen with the stored version an agent (or another window) wrote.
+  useEffect(() => {
+    pull.current = (conflict: boolean) => {
+      if (!id) return
+      api.getDocument(id).then((d) => {
+        if (d.revision <= known()) return
+        discard()
+        load(d)
+        setSync((n) => n + 1)
+        window.clearTimeout(remoteTimer.current)
+        setRemote({ by: d.edited_by ?? 'Another window', conflict })
+        remoteTimer.current = window.setTimeout(() => setRemote(null), REMOTE_SHOWN_MS)
+      }, noop)
+    }
+  })
 
   useEffect(() => {
-    if (id) api.getDocument(id).then(setDoc, () => setMissing(true))
+    if (id) api.getDocument(id).then(load, () => setMissing(true))
     api.googleStatus().then(setGoogle, () => setGoogle(null))
-  }, [id])
+  }, [id, load])
+
+  // Agents edit over MCP while the doc may be open here; check for their changes.
+  useEffect(() => {
+    if (!id) return
+    const tick = () => {
+      if (document.hidden || busy()) return
+      api.getRevision(id).then((r) => {
+        if (r.revision > known() && !busy()) pull.current(false)
+      }, noop)
+    }
+    const timer = window.setInterval(tick, POLL_MS)
+    document.addEventListener('visibilitychange', tick)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', tick)
+    }
+  }, [id, busy, known])
 
   if (missing)
     return (
@@ -289,7 +385,7 @@ export default function Editor() {
               aria-label="Title"
             />
             <AnimatePresence initial={false}>
-              {(state !== 'idle' || doc.source === 'mcp' || google?.connected) && (
+              {(state !== 'idle' || remote || doc.edited_by || google?.connected) && (
                 <motion.div
                   key="status"
                   className="editor-status"
@@ -298,12 +394,19 @@ export default function Editor() {
                   exit={{ height: 0, opacity: 0 }}
                   transition={{ type: 'spring', stiffness: 380, damping: 34 }}
                 >
-                  {doc.source === 'mcp' && (
-                    <span className="badge" title="Created by an AI agent over MCP">
-                      <Robot size={12} weight="fill" /> AI
+                  {doc.edited_by && !remote && (
+                    <span className="badge" title={`Last changed by ${doc.edited_by} over MCP`}>
+                      <Robot size={12} weight="fill" /> {doc.edited_by}
                     </span>
                   )}
-                  <SaveIndicator state={state} />
+                  {remote && state === 'idle' ? (
+                    <span className="save-state" data-state="remote" role="status">
+                      <Robot size={14} weight="fill" />
+                      {remote.conflict && doc.kind === 'doc' ? `${remote.by} changed this doc · Ctrl+Z gets your words back` : `Updated by ${remote.by}`}
+                    </span>
+                  ) : (
+                    <SaveIndicator state={state} />
+                  )}
                   <DriveBadge google={google} doc={doc} />
                 </motion.div>
               )}
@@ -321,7 +424,7 @@ export default function Editor() {
         {doc.kind === 'doc' && <div className="editor-tools" ref={setToolbarHost} />}
       </header>
       <div className="editor-body">
-        {doc.kind === 'doc' && <DocEditor body={doc.content} onChange={setContent} toolbarHost={toolbarHost} />}
+        {doc.kind === 'doc' && <DocEditor body={doc.content} onChange={setContent} toolbarHost={toolbarHost} sync={sync} />}
         {doc.kind === 'sheet' && <SheetEditor body={doc.content} onChange={setContent} />}
         {doc.kind === 'slides' && <SlidesEditor body={doc.content} onChange={setContent} />}
       </div>

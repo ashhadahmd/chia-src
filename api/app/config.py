@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,7 +18,23 @@ class Settings(BaseSettings):
     root_password: str
 
     database_url: str = "sqlite:///./chia.db"
+    # Run `alembic upgrade head` on startup. Handy locally; turn off where many instances start
+    # at once (AWS Lambda) and migrate from the deploy pipeline instead.
+    auto_migrate: bool = True
     cors_origins: list[str] = ["http://localhost:5173"]
+
+    # Where image bytes live. "local" needs no AWS setup; "s3" serves them through presigned URLs.
+    storage_backend: Literal["local", "s3"] = "local"
+    local_storage_dir: str = ".local_storage"
+    s3_bucket: str = ""
+    s3_prefix: str = ""
+    s3_region: str | None = None
+    s3_endpoint_url: str | None = None  # MinIO / LocalStack
+    presigned_url_seconds: int = 3600
+
+    # Who runs Google Drive backups. "local": a loop inside the API process (dev).
+    # "external": a separate worker calls app.worker (SQS/EventBridge-triggered Lambda in AWS).
+    drive_sync_runner: Literal["local", "external"] = "local"
 
     # Google Workspace bridge. Leave the client id/secret empty to run local-only.
     google_client_id: str = ""

@@ -511,11 +511,14 @@ export default function DocEditor({
   body,
   onChange,
   toolbarHost,
+  sync = 0,
 }: {
   body: DocBody
   onChange: (b: DocBody) => void
   /** Element in the page's top bar that hosts the formatting toolbar. */
   toolbarHost: HTMLElement | null
+  /** Changes when `body` was replaced from outside (an AI agent's edit), to show it. */
+  sync?: number
 }) {
   const [page, setPage] = useState<PageSize>(body.page ?? 'letter')
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
@@ -717,6 +720,23 @@ export default function DocEditor({
       window.removeEventListener('afterprint', after)
     }
   }, [editor])
+
+  // An agent's version replaces the page. It goes into undo history, so Ctrl+Z brings back
+  // what was here; the cursor stays about where it was.
+  const synced = useRef(sync)
+  useEffect(() => {
+    if (!editor || synced.current === sync) return
+    synced.current = sync
+    window.clearTimeout(timer.current) // a pending save of the old text would overwrite it
+    const { from, to } = editor.state.selection
+    editor.commands.setContent(body.html, { emitUpdate: false })
+    const end = editor.state.doc.content.size
+    editor.commands.setTextSelection({ from: Math.min(from, end), to: Math.min(to, end) })
+    if (body.page !== page) {
+      setPage(body.page)
+      editor.chain().updatePageSize(PAGES[body.page].size).run()
+    }
+  }, [sync, editor, body, page])
 
   const changePage = (p: PageSize) => {
     setPage(p)

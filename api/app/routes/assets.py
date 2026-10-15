@@ -1,10 +1,13 @@
 from fastapi import APIRouter, HTTPException, Response, UploadFile, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from app import assets
+from app.config import get_settings
 from app.db import SessionDep
 from app.deps import CurrentUser
 from app.models import Asset
+from app.storage import get_storage
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -25,12 +28,21 @@ def upload(file: UploadFile, session: SessionDep, user: CurrentUser) -> AssetRea
 
 @router.get("/{asset_id}", response_class=Response)
 def get(asset_id: str, session: SessionDep) -> Response:
-    """Public by design: the unguessable id is the key, since <img> can't send a bearer token."""
+    """Public by design: the unguessable id is the key, since <img> can't send a bearer token.
+    With S3 this redirects to a short-lived presigned URL, so the bytes never pass through the API."""
     asset = session.get(Asset, asset_id)
     if asset is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such image")
+    storage = get_storage()
+    if presigned := storage.presigned_url(asset.storage_key):
+        # Cached for less time than the URL lives, so a cached redirect never points at an expired URL.
+        ttl = max(0, get_settings().presigned_url_seconds - 300)
+        return RedirectResponse(presigned, status.HTTP_307_TEMPORARY_REDIRECT, headers={"Cache-Control": f"private, max-age={ttl}"})
+    data = storage.get(asset.storage_key)
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such image")
     return Response(
-        asset.data,
+        data,
         media_type=asset.media_type,
         headers={
             "Cache-Control": "private, max-age=31536000, immutable",

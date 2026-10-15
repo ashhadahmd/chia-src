@@ -2,6 +2,7 @@ import { motion } from 'motion/react'
 import { useAuth } from '../lib/useAuth'
 import { FILTERS, useFilter, type Filter } from '../lib/filter'
 import { SignOut } from '@phosphor-icons/react'
+import AgentsCard from './AgentsCard'
 import Brand from './Brand'
 import DriveCard from './DriveCard'
 import ThemeSwitch from './ThemeSwitch'
@@ -34,6 +35,7 @@ export default function Sidebar({ counts }: { counts: Record<Filter, number> }) 
         })}
       </nav>
       <div className="sidebar-foot">
+        <AgentsCard />
         <DriveCard />
         <ThemeSwitch />
         <div className="me">

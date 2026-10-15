@@ -1,5 +1,6 @@
 const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 const TOKEN_KEY = 'chia.token'
+const WORKSPACE_KEY = 'chia.workspace'
 
 export type DocKind = 'doc' | 'sheet' | 'slides'
 export type Cell = string | number | null
@@ -24,14 +25,36 @@ export interface SlidesBody {
 export interface DocSummary {
   id: string
   kind: DocKind
+  workspace_id: string
   title: string
   source: 'ui' | 'mcp'
+  /** Bumped on every change; saves send the one they started from. */
+  revision: number
+  /** Name of the AI agent behind the latest change; null when the user made it. */
+  edited_by: string | null
+  /** Name of the AI agent that made the document; null when the user did. */
+  created_by: string | null
   /** Google editor URL of the Drive backup copy, once one exists. */
   drive_url: string | null
   backed_up_at: string | null
   backup_error: string | null
+  drive_sync_status: 'clean' | 'pending' | 'syncing' | 'failed'
   created_at: string
   updated_at: string
+}
+
+export type Role = 'owner' | 'admin' | 'editor' | 'viewer'
+
+/** Everyone has a personal workspace; teams share team/enterprise ones. */
+export interface Workspace {
+  id: string
+  name: string
+  slug: string
+  kind: 'personal' | 'team' | 'enterprise'
+  plan_tier: 'free' | 'pro' | 'enterprise'
+  /** The signed-in user's role there. */
+  role: Role
+  created_at: string
 }
 
 export type Doc = DocSummary &
@@ -46,6 +69,24 @@ export interface User {
   email: string
   username: string
   is_root: boolean
+}
+
+export interface DocRevision {
+  revision: number
+  edited_by: string | null
+  updated_at: string
+}
+
+/** A key an AI agent uses to reach Chia over MCP; its name labels the agent's edits. */
+export interface AgentKey {
+  id: number
+  name: string
+  prefix: string
+  /** Workspace the agent is locked to; null follows the personal workspace. */
+  workspace_id: string | null
+  role: 'editor' | 'viewer'
+  created_at: string
+  last_used_at: string | null
 }
 
 export class ApiError extends Error {
@@ -73,12 +114,39 @@ export function setToken(token: string | null) {
   }
 }
 
+/** The workspace requests work in. Unset (solo users) means the personal workspace, so the
+    X-Workspace-Id header is only sent once someone picks a team workspace. */
+export function readWorkspace(): string | null {
+  try {
+    return localStorage.getItem(WORKSPACE_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setWorkspace(id: string | null) {
+  try {
+    if (id) localStorage.setItem(WORKSPACE_KEY, id)
+    else localStorage.removeItem(WORKSPACE_KEY)
+  } catch {
+    /* storage unavailable: stays in the personal workspace */
+  }
+}
+
+function authHeaders(init?: HeadersInit): Headers {
+  const headers = new Headers(init)
+  const token = readToken()
+  const workspace = readWorkspace()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (workspace) headers.set('X-Workspace-Id', workspace)
+  return headers
+}
+
 export const UNAUTHORIZED_EVENT = 'chia:unauthorized'
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = readToken()
-  const headers = new Headers(init.headers)
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const headers = authHeaders(init.headers)
   if (init.body && !(init.body instanceof URLSearchParams) && !(init.body instanceof FormData))
     headers.set('Content-Type', 'application/json')
 
@@ -117,8 +185,7 @@ export const IMPORT_ACCEPT = '.docx,.xlsx,.xlsm,.csv,.tsv,.pptx,.md,.markdown,.t
 export type ExportFormat = 'pdf' | 'docx' | 'xlsx' | 'pptx'
 
 async function download(path: string, fallbackName: string) {
-  const token = readToken()
-  const res = await fetch(`${BASE_URL}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() })
   if (!res.ok) {
     const detail = await res.json().then((b) => b.detail, () => res.statusText)
     throw new ApiError(res.status, typeof detail === 'string' ? detail : 'Export failed')
@@ -151,8 +218,9 @@ export const api = {
   getDocument: (id: string) => request<Doc>(`/api/documents/${id}`),
   createDocument: (kind: DocKind, title = 'Untitled') =>
     request<Doc>('/api/documents', { method: 'POST', body: JSON.stringify({ kind, title }) }),
-  updateDocument: (id: string, patch: { title?: string; content?: Doc['content'] }) =>
+  updateDocument: (id: string, patch: { title?: string; content?: Doc['content']; base_revision?: number }) =>
     request<DocSummary>(`/api/documents/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  getRevision: (id: string) => request<DocRevision>(`/api/documents/${id}/revision`),
   deleteDocument: (id: string) => request<void>(`/api/documents/${id}`, { method: 'DELETE' }),
   exportFile: (id: string, format: ExportFormat, title: string, background?: string) =>
     download(
@@ -177,7 +245,14 @@ export const api = {
   googleStatus: () => request<GoogleStatus>('/api/google'),
   googleConnect: () => request<{ auth_url: string }>('/api/google/connect', { method: 'POST' }),
   googleDisconnect: () => request<void>('/api/google', { method: 'DELETE' }),
+  listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
+  listKeys: () => request<AgentKey[]>('/api/keys'),
+  createKey: (name: string) => request<AgentKey & { key: string }>('/api/keys', { method: 'POST', body: JSON.stringify({ name }) }),
+  revokeKey: (id: number) => request<void>(`/api/keys/${id}`, { method: 'DELETE' }),
 }
+
+/** Where AI agents connect (streamable HTTP MCP). */
+export const MCP_URL = `${BASE_URL}/mcp`
 
 /** Backend stores UTC; SQLite drops the offset, so treat bare timestamps as UTC. */
 export function parseDate(value: string): Date {

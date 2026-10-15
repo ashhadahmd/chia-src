@@ -13,12 +13,14 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
-from sqlmodel import Session, func, select
+from sqlalchemy import delete
+from sqlmodel import Session, col, func, select
 
 from app.config import get_settings
 from app.crypto import decrypt, encrypt
 from app.models import GoogleAccount, OAuthState, User, utcnow
 from app.security import hash_password
+from app.workspaces import personal_workspace
 
 # drive.file only reaches files Chia itself created or the user opened with Chia. It is a
 # non-sensitive scope, so the OAuth app needs no Google security review.
@@ -63,7 +65,10 @@ def start(session: Session, user_id: int | None) -> str:
     state = secrets.token_urlsafe(32)
     url, _ = flow.authorization_url(access_type="offline", prompt="consent", include_granted_scopes="true", state=state)
     assert flow.code_verifier is not None
-    session.add(OAuthState(state=state, user_id=user_id, code_verifier=flow.code_verifier))
+    now = utcnow()
+    # Abandoned consents are cleared here, a cheap indexed delete, instead of on every boot.
+    session.execute(delete(OAuthState).where(col(OAuthState.expires_at) < now))
+    session.add(OAuthState(state=state, user_id=user_id, code_verifier=flow.code_verifier, created_at=now, expires_at=now + STATE_TTL))
     session.commit()
     return url
 
@@ -84,7 +89,7 @@ def finish(session: Session, code: str, state: str) -> tuple[User, bool]:
         raise ValueError("Unknown or already used sign-in link")
     session.delete(pending)
     session.commit()
-    if utcnow() - pending.created_at.replace(tzinfo=UTC) > STATE_TTL:
+    if pending.expires_at.replace(tzinfo=UTC) < utcnow():
         raise ValueError("Sign-in link expired, start again")
 
     flow = Flow.from_client_config(
@@ -120,6 +125,8 @@ def finish(session: Session, code: str, state: str) -> tuple[User, bool]:
             session.add(user)
             session.commit()
             session.refresh(user)
+            assert user.id is not None
+            personal_workspace(session, user.id, user.username)
     else:
         user = session.get(User, pending.user_id)
         if user is None:

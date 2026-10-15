@@ -117,6 +117,8 @@ function ImportToast({ task, onClose }: { task: ImportTask; onClose: () => void 
   )
 }
 
+const LIBRARY_POLL_MS = 5000
+
 export default function Library() {
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -135,6 +137,19 @@ export default function Library() {
     api.listDocuments().then(setDocs, () => setDocs([]))
     api.googleStatus().then(setGoogle, () => setGoogle(null))
     return () => window.clearTimeout(dismiss.current)
+  }, [])
+
+  // AI agents add documents from outside; show them as they arrive.
+  useEffect(() => {
+    const refresh = () => {
+      if (!document.hidden) api.listDocuments().then(setDocs, () => undefined)
+    }
+    const timer = window.setInterval(refresh, LIBRARY_POLL_MS)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refresh)
+    }
   }, [])
 
   /** Runs import jobs one by one; opens the document when exactly one came in cleanly. */

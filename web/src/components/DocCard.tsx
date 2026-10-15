@@ -60,9 +60,9 @@ export default function DocCard({ doc, index, onDelete, ref }: ItemProps) {
             <span className="card-kind">
               <Icon size={16} weight="fill" />
               {label}
-              {doc.source === 'mcp' && (
-                <span className="badge" title="Created by an AI agent over MCP">
-                  <Robot size={12} weight="fill" /> AI
+              {agentOf(doc) && (
+                <span className="badge" title={agentTitle(doc)}>
+                  <Robot size={12} weight="fill" /> {agentOf(doc)}
                 </span>
               )}
             </span>
@@ -110,9 +110,9 @@ export function DocRow({ doc, index, onDelete, ref }: ItemProps) {
             <Icon size={18} weight="fill" />
           </span>
           <span className="row-title">{doc.title}</span>
-          {doc.source === 'mcp' && (
-            <span className="badge" title="Created by an AI agent over MCP">
-              <Robot size={12} weight="fill" /> AI
+          {agentOf(doc) && (
+            <span className="badge" title={agentTitle(doc)}>
+              <Robot size={12} weight="fill" /> {agentOf(doc)}
             </span>
           )}
           {doc.drive_url && (
@@ -131,4 +131,14 @@ export function DocRow({ doc, index, onDelete, ref }: ItemProps) {
       </button>
     </motion.li>
   )
+}
+
+/** The AI agent to credit on the card: whoever changed it last, else whoever made it. */
+function agentOf(doc: DocSummary): string | null {
+  return doc.edited_by ?? doc.created_by ?? (doc.source === 'mcp' ? 'AI' : null)
+}
+
+function agentTitle(doc: DocSummary): string {
+  if (doc.edited_by) return `Last changed by ${doc.edited_by} over MCP`
+  return `Made by ${doc.created_by ?? 'an AI agent'} over MCP`
 }

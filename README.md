@@ -10,6 +10,7 @@ A calm home for docs, sheets and slides, with its own editor, plus an MCP endpoi
 ```sh
 cd api && cp -n .env.example .env   # first run only; fill in secrets
 uv run fastapi dev app/main.py      # REST at /api, MCP at /mcp, OpenAPI docs at /docs
+                                    # (applies database migrations on startup)
 
 cd web && npm install && npm run dev
 ```
@@ -42,14 +43,15 @@ Legacy `.doc`, `.xls`, `.ppt` and OpenDocument files are refused with a "save as
 
 ## Pictures, tables and diagrams
 
-- **Pictures:** toolbar **Image**, paste, or drop into the page. Large photos are scaled to 2400 px; WebP, AVIF, BMP and SVG become PNG or JPEG so every export can embed them. Select a picture to resize it (handles or S/M/L/Full), align it, add alt text or replace it. Images live in the `asset` table and are served at `/api/assets/{id}`. That URL is public by design (`<img>` can't send the bearer token), so its long random id is the key. Deleting a doc removes images no other doc uses.
+- **Pictures:** toolbar **Image**, paste, or drop into the page. Large photos are scaled to 2400 px; WebP, AVIF, BMP and SVG become PNG or JPEG so every export can embed them. Select a picture to resize it (handles or S/M/L/Full), align it, add alt text or replace it. Image bytes live in blob storage (`api/.local_storage/` locally, S3 with `STORAGE_BACKEND=s3`), with their details in the `asset` table, and are served at `/api/assets/{id}` (with S3, a redirect to a short-lived presigned URL). That URL is public by design (`<img>` can't send the bearer token), so its long random id is the key. Deleting a doc removes images no other doc uses (tracked in `assetreference`).
 - **Tables:** toolbar **Table** (pick a size on the grid). With the cursor in a table, a bar above it adds or removes rows and columns, merges or splits cells and toggles the header row; the same tools are on right-click. Drag column edges to resize. Tables break across pages between rows, so merges stay within a row.
 - **Diagrams:** toolbar **Diagram** opens an editor with templates (flowchart, sequence, mind map, org chart, timeline, schedule, pie, quadrant, states, journey, data model, classes) and a live preview. Diagrams are written in [Mermaid](https://mermaid.js.org) and drawn in Chia's palette and type, redrawn for light or dark mode. A light-mode picture is stored with each diagram for PDF, Word and Google exports. MCP clients add diagrams as ```` ```mermaid ```` blocks in markdown; their picture is made the first time the doc is opened.
 
 ## Storage, backup and export
 
-- **Storage:** Chia's database is the source of truth.
-- **Backup:** for users signed in with or linked to Google, each document is mirrored as a native Google Doc, Sheet or Slides file in a `Chia` folder in their Drive. The mirror is written about 4 seconds after the last edit. Backups that were still pending when the server stopped are resumed on startup.
+- **Storage:** Chia's database is the source of truth: SQLite locally, Postgres (`DATABASE_URL=postgresql+psycopg://...`) in production. Schema changes are Alembic migrations in `api/migrations` (`uv run alembic upgrade head`; the API runs it on startup unless `AUTO_MIGRATE=false`).
+- **Workspaces:** every user has a personal workspace, and requests without an `X-Workspace-Id` header use it, so solo use needs no setup. Teams create `team` or `enterprise` workspaces (`/api/workspaces`) with owner, admin, editor and viewer roles, and single documents can be shared with a person or one agent's key (`/api/documents/{id}/shares`).
+- **Backup:** for users signed in with or linked to Google, each document is mirrored as a native Google Doc, Sheet or Slides file in a `Chia` folder in the creator's Drive. Saves mark the document `pending`; the mirror is written about 4 seconds after the last edit by a runner inside the API (`DRIVE_SYNC_RUNNER=local`) or by `app.worker` (a scheduled Lambda or `uv run python -m app.worker`). The state lives in the database, so pending backups survive restarts.
 - **Export:** the **Export** button in every editor.
   - Docs: `GET /api/documents/{id}/export/pdf?background=%23F7F4ED` (PDF with any page colour) and `GET .../export/docx` (Word).
   - Sheets: `GET .../export/xlsx` (Excel, grey frozen header row).
@@ -57,23 +59,27 @@ Legacy `.doc`, `.xls`, `.ppt` and OpenDocument files are refused with a "save as
   - All kinds: `POST .../export/google` syncs the Drive copy and returns its Google Docs, Sheets or Slides URL.
 - **Printing:** uses real `@page` sizes and always prints in light colours.
 
-## Connect a local AI over MCP
+## Connect AI agents over MCP
 
-Issue a key per agent: `POST /api/keys {"name": "LM Studio"}`. The full key is shown only once. Each key acts as the user who created it. `MCP_API_KEY` in `.env` is a bootstrap key mapped to the root user.
+Use **AI agents** in the sidebar. Pick an agent, press **Connect**, and run the command it shows; each agent's own `mcp add` command writes its config. One key per agent, shown once; **New key** replaces it and **Disconnect** revokes it. Keys act as the user who made them, and the key's name labels the agent's work in Chia.
 
-```json
-{
-  "mcpServers": {
-    "chia": {
-      "type": "http",
-      "url": "http://localhost:8000/mcp",
-      "headers": { "Authorization": "Bearer <key>" }
-    }
-  }
-}
-```
+| Agent | Command the dialog gives (key filled in) | Notes |
+| --- | --- | --- |
+| Claude Code (CLI and VS Code) | `claude mcp add --transport http --scope user chia http://localhost:8000/mcp --header "Authorization: Bearer <key>"` | |
+| Codex (CLI and VS Code) | `set -Ux CHIA_MCP_KEY <key>` (fish) or an `export` line (bash/zsh), then `codex mcp add chia --url http://localhost:8000/mcp --bearer-token-env-var CHIA_MCP_KEY` | Writes ask for approval. For unattended runs: `codex exec -c 'mcp_servers.chia.default_tools_approval_mode="approve"' ...` |
+| Gemini CLI | `gemini mcp add --scope user --transport http chia http://localhost:8000/mcp --header "Authorization: Bearer <key>"` | Gemini turns MCP servers off in folders it doesn't trust. Trust the folder when it asks. |
+| Copilot CLI | `copilot mcp add --transport http --header "Authorization: Bearer <key>" chia http://localhost:8000/mcp` | |
 
-Tools: `list_documents`, `get_document`, `create_doc`, `create_sheet`, `create_slides`, `update_document`. Once a document has been backed up, results include its `drive_url`.
+Any other streamable-HTTP client: URL `http://localhost:8000/mcp`, header `Authorization: Bearer <key>`, plus `X-Workspace-Id: <id>` to work in a team workspace (the personal workspace otherwise). Keys can also be issued with `POST /api/keys {"name": "..."}`; add `"workspace_id"` to lock the agent to one workspace and `"role": "viewer"` to make it read-only. `MCP_API_KEY` in `.env` is a bootstrap key for the root user; its edits show as "AI agent".
+
+Tools:
+- Read-only: `list_documents`, `search_documents` (title and text), `get_document` (docs as markdown, or `format="html"` to keep styling).
+- Write: `create_doc` (markdown), `create_sheet`, `create_slides`, and `append_to_doc`, which adds markdown to the end and leaves existing content untouched.
+- Replace: `update_document`, which overwrites a document's title or content.
+
+Results include `chia_url`, which opens the document in Chia, and `drive_url` once the document has a Drive backup. Tools carry read-only and destructive hints, so clients can decide which calls need approval.
+
+**Live edits.** An open document checks for agent changes every 2.5 s and shows them with "Updated by <agent>". Saves carry the revision they build on. If an agent changed the doc while you were typing, your save is refused (409) and the agent's version loads. Ctrl+Z brings back what you had. Library cards name the agent that last changed or created a document.
 
 ## Content shapes
 

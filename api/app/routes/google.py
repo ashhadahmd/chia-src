@@ -111,7 +111,7 @@ def callback(session: SessionDep, state: str = "", code: str = "", error: str = 
         return _to_frontend("/auth/google", fragment={"error": "Could not complete Google sign-in, try again"})
 
     assert user.id is not None
-    backup.queue_user(user.id)
+    backup.queue_user(session, user.id)
     if pending_login:
         return _to_frontend("/auth/google", fragment={"token": create_access_token(user.id)})
     return _to_frontend("/", query={"google": "connected"})
